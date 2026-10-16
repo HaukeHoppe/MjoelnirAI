@@ -480,7 +480,7 @@ domains, and kept only if the grader confirms the summary answers them.
 |----------|-------|-----|
 | Structured outputs (Pydantic) for every judgment | `Grade`, `AnswerCheck`, `Suggestions`, `ChunkClass`, `RelationClass`, `ClusterSummary` | No fragile parsing of free text |
 | Temperature 0 everywhere | all `ChatOpenAI(...)` | Reproducible decisions |
-| Model tiering | mini for bulk grading and answering, `gpt-4o` for checking and revising | Spend quality where errors are costly |
+| Model tiering | `gpt-4.1-mini` for bulk grading, `gpt-4.1` for answering, `gpt-4o` for checking and revising | Spend quality where errors are costly |
 | Content-hash caches | `chunk_classes.json`, `relation_classes.json` | Re-ingestion only reclassifies changed data |
 | Incremental cache writes every 250 items | `CACHE_BATCH` | Crash-safe long runs |
 | Rate-limit handling | `MAX_CONCURRENCY = 4`, `max_retries=30` / `10` | Stay under the org TPM limit without aborting |
