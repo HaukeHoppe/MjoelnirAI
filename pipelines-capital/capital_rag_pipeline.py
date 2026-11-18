@@ -11,6 +11,7 @@ requirements: langchain-community,langchain-openai,langchain-core,faiss-cpu,open
 import json
 import os
 import re
+import threading
 from collections import Counter, OrderedDict
 from difflib import SequenceMatcher
 from typing import Generator, Iterator, List, Literal, Union
@@ -21,6 +22,100 @@ from rank_bm25 import BM25Okapi
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores.utils import DistanceStrategy
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.callbacks import BaseCallbackHandler
+import tiktoken
+
+
+# USD per 1M tokens: [input, cached input, output]. Check openai.com/api/pricing when models change.
+DEFAULT_PRICES = {
+    "gpt-4.1": [2.00, 0.50, 8.00],
+    "gpt-4.1-mini": [0.40, 0.10, 1.60],
+    "gpt-4o": [2.50, 1.25, 10.00],
+    "text-embedding-3-large": [0.13, 0.13, 0.0],
+}
+
+
+class UsageMeter(BaseCallbackHandler):
+    # Zählt Tokens und Kosten einer einzelnen Frage, getrennt nach Modell. Pro Frage eine eigene
+    # Instanz, weil die Pipeline-Instanz von allen Nutzern gleichzeitig verwendet wird.
+
+    def __init__(self, prices: dict):
+        # Zwei Töpfe: "pending" seit dem letzten Schritt, "total" für die ganze Frage.
+        # Das Lock schützt beide, weil grader.batch() aus mehreren Threads gleichzeitig meldet.
+        self.prices = prices
+        self.lock = threading.Lock()
+        self.pending, self.total = {}, {}
+
+    def on_llm_end(self, response, **kwargs):
+        # Wird von LangChain nach jedem Chat-Aufruf aufgerufen (invoke, batch, stream, structured output)
+        # und liest die exakten Token-Zahlen, die OpenAI zurückgemeldet hat, samt verwendetem Modell.
+        message = getattr(response.generations[0][0], "message", None)
+        usage = getattr(message, "usage_metadata", None)
+        if not usage:
+            return
+        model = (response.llm_output or {}).get("model_name") or message.response_metadata.get("model_name", "?")
+        cached = (usage.get("input_token_details") or {}).get("cache_read", 0) or 0
+        self._add(model, usage["input_tokens"], cached, usage["output_tokens"])
+
+    def add_embedding(self, model: str, texts: List[str]):
+        # Embeddings melden über LangChain keine Usage: tiktoken zählt genau die Tokens, nach denen
+        # OpenAI abrechnet. Embeddings haben keine Output-Tokens.
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        self._add(model, sum(len(encoding.encode(t)) for t in texts), 0, 0)
+
+    def _key(self, model: str) -> str:
+        # Ordnet z. B. "gpt-4.1-mini-2025-04-14" dem Preiseintrag zu; der längste passende Präfix
+        # gewinnt, damit gpt-4.1-mini nicht als gpt-4.1 zählt.
+        keys = [k for k in self.prices if model.startswith(k)]
+        return max(keys, key=len) if keys else model
+
+    def _add(self, model: str, inp: int, cached: int, out: int):
+        # Addiert einen Aufruf in beide Töpfe; eine Zeile ist [input, davon cached, output].
+        with self.lock:
+            for bucket in (self.pending, self.total):
+                row = bucket.setdefault(self._key(model), [0, 0, 0])
+                row[0] += inp
+                row[1] += cached
+                row[2] += out
+
+    def take(self) -> dict:
+        # Gibt den Verbrauch seit dem letzten Schritt zurück und leert den pending-Topf.
+        with self.lock:
+            usage, self.pending = self.pending, {}
+        return usage
+
+    def cost(self, model: str, row: list) -> float:
+        # Kosten in USD: ungecachter Input + gecachter Input + Output, je × Preis / 1 Mio.
+        # Unbekannte Modelle kosten 0 und werden in describe() markiert.
+        p_in, p_cached, p_out = self.prices.get(model, (0, 0, 0))
+        inp, cached, out = row
+        return ((inp - cached) * p_in + cached * p_cached + out * p_out) / 1e6
+
+    def describe(self, usage: dict, per_model: bool = True) -> str:
+        # Text für die Statuszeile im deutschen Zahlenformat. per_model=True: eine Angabe je
+        # Modell; False: nur die Summe über alle Modelle (Gesamtzeile).
+        num = lambda n: f"{n:,}".replace(",", ".")
+        money = lambda c: "<0,0001 $" if 0 < c < 1e-4 else f"{c:.4f} $".replace(".", ",")
+        total = sum(self.cost(m, r) for m, r in usage.items())
+        if not per_model:
+            inp = sum(r[0] for r in usage.values())
+            out = sum(r[2] for r in usage.values())
+            return f"{num(inp)} in / {num(out)} out · {money(total)}"
+        parts = []
+        for model, (inp, cached, out) in usage.items():
+            name = model if model in self.prices else f"{model} (Preis unbekannt)"
+            hint = f" ({num(cached)} cached)" if cached else ""
+            parts.append(f"{name}: {num(inp)} in{hint} / {num(out)} out")
+        return " · ".join(parts) + f" · {money(total)}"
+
+
+def run_config(meter, **extra) -> dict:
+    # LangChain-Config für einen Aufruf: hängt den Zähler als Callback an, falls es einen gibt.
+    # Ohne Zähler (z. B. generate_start_suggestions.py) bleibt alles wie bisher.
+    return {**extra, **({"callbacks": [meter]} if meter else {})}
 
 
 class Grade(BaseModel):
@@ -515,6 +610,10 @@ class Pipeline:
         # A topic (graph concept) must appear in at least this many chunks to be
         # suggested, so the user is not sent to a one-off mention.
         EXPLORE_MIN_CHUNKS: int = 2
+        # Shows tokens (input/output) and cost per step and per question in the status line.
+        SHOW_COSTS: bool = True
+        # USD per 1M tokens as JSON: {"model prefix": [input, cached input, output]}.
+        MODEL_PRICES: str = json.dumps(DEFAULT_PRICES)
 
     def __init__(self):
         self.name = "Capital Markets RAG"
@@ -562,7 +661,8 @@ class Pipeline:
             self._build_keyword_index()
             self._load_graph()
 
-        self.llm = ChatOpenAI(model=self.valves.LLM_MODEL, temperature=0, streaming=True)
+        # stream_usage: OpenAI reports token usage for streamed answers too (cost display).
+        self.llm = ChatOpenAI(model=self.valves.LLM_MODEL, temperature=0, streaming=True, stream_usage=True)
         self.answer_llm = ChatOpenAI(model=self.valves.LLM_MODEL, temperature=0)
         grader_llm = ChatOpenAI(model=self.valves.GRADER_MODEL, temperature=0)
         self.grader = grader_llm.with_structured_output(Grade)
@@ -648,9 +748,11 @@ class Pipeline:
     async def on_valves_updated(self):
         self._load()
 
-    def _fusion_candidates(self, query: str) -> List[tuple]:
+    def _fusion_candidates(self, query: str, meter=None) -> List[tuple]:
         # Adapted from fusion_retrieval.py: min-max normalized dense and BM25
         # scores, combined with ALPHA. Dense scores are per chunk (best vector).
+        if meter:
+            meter.add_embedding(self.valves.EMBEDDING_MODEL, [query])
         dense = {}
         for doc, score in self.vectorstore.similarity_search_with_score(
             query, k=self.valves.FETCH_K
@@ -688,10 +790,12 @@ class Pipeline:
                         extra.append((other, 0.0))
         return candidates + extra[: self.valves.GRAPH_EXPAND_K]
 
-    def _match_concepts(self, phrases: List[str]) -> dict:
+    def _match_concepts(self, phrases: List[str], meter=None) -> dict:
         # Question concept phrases -> graph concepts (top 3 per phrase above CONCEPT_MIN_SIMILARITY).
         if not phrases or self.concept_vectors is None:
             return {}
+        if meter:
+            meter.add_embedding(self.valves.EMBEDDING_MODEL, phrases)
         vectors = np.array(self.vectorstore.embedding_function.embed_documents(phrases), dtype=np.float32)
         vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
         matched = {}
@@ -702,12 +806,14 @@ class Pipeline:
                     matched[name] = max(float(row[i]), matched.get(name, 0.0))
         return matched
 
-    def _causal_paths(self, question: str) -> List[List[str]]:
+    def _causal_paths(self, question: str, meter=None) -> List[List[str]]:
         # Directed cause -> effect paths through the concept graph, from the question's causes to its
         # effects (breadth-first, so shorter paths first). Without effects: the strongest onward chains.
-        asked = self.concept_extractor.invoke(QUERY_CONCEPTS_PROMPT.format(question=question))
-        starts = self._match_concepts(asked.causes)
-        ends = self._match_concepts(asked.effects)
+        asked = self.concept_extractor.invoke(
+            QUERY_CONCEPTS_PROMPT.format(question=question), config=run_config(meter)
+        )
+        starts = self._match_concepts(asked.causes, meter)
+        ends = self._match_concepts(asked.effects, meter)
         if not starts:
             return []
         max_hops, wanted = self.valves.CHAIN_MAX_HOPS, self.valves.CHAIN_PATHS
@@ -781,7 +887,9 @@ class Pipeline:
             uncovered = {s for s in uncovered if best not in step_chunks[s]}
         return chosen
 
-    def _grade(self, query: str, candidates: List[tuple], path_ids: frozenset = frozenset()) -> List[tuple]:
+    def _grade(
+        self, query: str, candidates: List[tuple], path_ids: frozenset = frozenset(), meter=None
+    ) -> List[tuple]:
         # reranking.py-style 0-10 LLM scoring combined with reliable_rag's
         # relevance grading: unsupported chunks are dropped before generation.
         docs = [self.docs[chunk_id] for chunk_id, _ in candidates]
@@ -792,7 +900,7 @@ class Pipeline:
                 )
                 for doc in docs
             ],
-            config={"max_concurrency": 8},
+            config=run_config(meter, max_concurrency=8),
             return_exceptions=True,
         )
         kept, steps = [], []
@@ -812,7 +920,8 @@ class Pipeline:
         return kept[: self.valves.TOP_K] + steps[: self.valves.CHAIN_TOP_K]
 
     def _explore(
-        self, query: str, candidates: List[tuple], answered: bool = False, exclude: set = frozenset()
+        self, query: str, candidates: List[tuple], answered: bool = False, exclude: set = frozenset(),
+        meter=None,
     ) -> List[tuple]:
         # Explorer mode: the concepts of the closest chunks (and graph neighbours
         # of those) are topics the index covers. Without an answer they are
@@ -823,6 +932,8 @@ class Pipeline:
         pool = [chunk_id for chunk_id, _ in candidates]
         if not pool:
             # Nothing passed MIN_SIMILARITY or BM25: take the nearest chunks anyway.
+            if meter:
+                meter.add_embedding(self.valves.EMBEDDING_MODEL, [query])
             for doc, _ in self.vectorstore.similarity_search_with_score(
                 query, k=self.valves.FETCH_K
             ):
@@ -868,7 +979,8 @@ class Pipeline:
                 n=self.valves.EXPLORE_SUGGESTIONS,
                 question=query,
                 topics=listing,
-            )
+            ),
+            config=run_config(meter),
         ).suggestions
         seen, proposals = set(), []
         for s in picked:
@@ -889,7 +1001,7 @@ class Pipeline:
                 )
                 for s, doc in proposals
             ],
-            config={"max_concurrency": 8},
+            config=run_config(meter, max_concurrency=8),
             return_exceptions=True,
         )
         return [
@@ -932,14 +1044,14 @@ class Pipeline:
             {"follow_ups": [q for _, q in entry["suggestions"]]}, ensure_ascii=False
         )
 
-    def _unsupported_claims(self, context: str, blocks: List[dict], answer: str) -> tuple:
+    def _unsupported_claims(self, context: str, blocks: List[dict], answer: str, meter=None) -> tuple:
         # reliable_rag-style hallucination check, per claim: a claim only counts
         # as supported if the checker says so AND (for facts) its quote really is
         # in the context. Meta claims ("the sources don't explain why") need no quote.
         # Also returns whether the answer has any fact claim at all - an answer of
         # only meta claims ("the sources don't cover this") is a refusal - and the
         # answer sentences the problems were found in.
-        check = self.checker.invoke(CHECK_PROMPT.format(context=context, answer=answer))
+        check = self.checker.invoke(CHECK_PROMPT.format(context=context, answer=answer), config=run_config(meter))
         has_facts = any(claim.kind == "fact" for claim in check.claims)
         unsupported, sentences = [], []
         for claim in check.claims:
@@ -963,13 +1075,15 @@ class Pipeline:
             sentences.append(claim.answer_sentence)
         return unsupported, has_facts, sentences
 
-    def _corroborate(self, answer: str, context: str, blocks: List[dict]) -> tuple:
+    def _corroborate(self, answer: str, context: str, blocks: List[dict], meter=None) -> tuple:
         # Cites further blocks in lines of the checked answer (a chain step is one line) when they state the
         # same. Accepted only if the line cites something already, the block is a concept block not yet cited
         # there, and the quote really is in that block. Returns the answer and the number added.
         lines = answer.split("\n")
         numbered = "\n".join(f"L{i}: {line}" for i, line in enumerate(lines, start=1) if line.strip())
-        found = self.corroborator.invoke(CORROBORATE_PROMPT.format(context=context, answer=numbered))
+        found = self.corroborator.invoke(
+            CORROBORATE_PROMPT.format(context=context, answer=numbered), config=run_config(meter)
+        )
         added = {}
         for item in found.items:
             if not (item.same_statement and 1 <= item.line <= len(lines) and 1 <= item.block <= len(blocks)):
@@ -989,16 +1103,16 @@ class Pipeline:
             lines[number - 1] = line[: last.end()] + "".join(f"[{n}]" for n in sorted(blocks_added)) + line[last.end():]
         return "\n".join(lines), sum(len(n) for n in added.values())
 
-    def _grounded_answer(self, question: str, context: str, blocks: List[dict]) -> Iterator[tuple]:
+    def _grounded_answer(self, question: str, context: str, blocks: List[dict], meter=None) -> Iterator[tuple]:
         # Yields ("status", short, detail) progress steps and finally
         # ("answer", text or None, has_facts).
         yield ("status", "Formuliere Antwort nur aus den Quellen …", None)
         answer = self.answer_llm.invoke(
-            ANSWER_PROMPT.format(context=context, question=question)
+            ANSWER_PROMPT.format(context=context, question=question), config=run_config(meter)
         ).content
         for attempt in range(self.valves.MAX_REVISIONS + 1):
             yield ("status", "Prüfe jede Aussage gegen die Quellen …", None)
-            unsupported, has_facts, sentences = self._unsupported_claims(context, blocks, answer)
+            unsupported, has_facts, sentences = self._unsupported_claims(context, blocks, answer, meter)
             if not unsupported:
                 yield ("status", "Alle Aussagen sind durch die Quellen belegt ✓", None)
                 yield ("answer", answer, has_facts)
@@ -1018,7 +1132,8 @@ class Pipeline:
                     question=question,
                     answer=answer,
                     unsupported="\n".join(f"- {c}" for c in unsupported),
-                )
+                ),
+                config=run_config(meter),
             ).content
             # The prompt labels the draft "Answer:"; the model sometimes echoes it.
             answer = re.sub(r"^\s*\**(answer|antwort)\**\s*:\s*\**\s*", "", answer, flags=re.IGNORECASE)
@@ -1027,7 +1142,7 @@ class Pipeline:
         trimmed = drop_sentences(answer, sentences)
         if trimmed and trimmed != answer:
             yield ("status", "Entferne nicht belegte Sätze und prüfe erneut …", None)
-            unsupported, has_facts, _ = self._unsupported_claims(context, blocks, trimmed)
+            unsupported, has_facts, _ = self._unsupported_claims(context, blocks, trimmed, meter)
             if not unsupported and has_facts:
                 yield ("status", "Verbleibende Aussagen sind belegt ✓", None)
                 yield ("answer", trimmed, has_facts)
@@ -1066,14 +1181,38 @@ class Pipeline:
         # the full step log (incl. rejected claims) into a collapsible <think> block.
         streaming = body.get("stream", True)
         log_open = False
+        # Cost display: tokens and cost of each step, then the question's total (SHOW_COSTS).
+        meter = UsageMeter(json.loads(self.valves.MODEL_PRICES)) if self.valves.SHOW_COSTS else None
+        open_step = None
+
+        def status(text: str, done: bool = False) -> dict:
+            # Ein Open-WebUI-Status-Event, also eine Zeile in der grauen Statuszeile.
+            return {"event": {"type": "status", "data": {"description": text, "done": done}}}
+
+        def cost_line() -> list:
+            # Schließt den laufenden Schritt ab: wiederholt dessen Text mit Tokens und Kosten seit
+            # dem letzten Schritt. Ohne Verbrauch, Zähler oder Streaming entsteht keine Zeile.
+            usage = meter.take() if meter else {}
+            if not (streaming and usage and open_step):
+                return []
+            return [status(f"{open_step.rstrip(' …')} — {meter.describe(usage)}")]
+
+        def summary() -> list:
+            # Letzte Zeile der Frage: offenen Schritt abschließen, dann die Summe über alle Modelle.
+            if not (meter and streaming):
+                return []
+            return cost_line() + [
+                status(f"Σ Frage gesamt: {meter.describe(meter.total, per_model=False)}", done=True)
+            ]
 
         def step(short: str, detail: str = None, done: bool = False) -> list:
-            nonlocal log_open
+            # Sendet einen neuen Fortschrittsschritt; vorher die Kostenzeile des vorherigen Schritts.
+            nonlocal log_open, open_step
             out = []
             if streaming:
-                out.append(
-                    {"event": {"type": "status", "data": {"description": short, "done": done}}}
-                )
+                out += cost_line()
+                out.append(status(short, done))
+            open_step = short
             if self.valves.SHOW_THINKING_LOG:
                 if not log_open:
                     out.append("<think>\n")
@@ -1090,7 +1229,7 @@ class Pipeline:
                 return []
             yield from step(f"{reason} – suche verwandte Themen …")
             try:
-                return self._explore(user_message, candidates, exclude=exclude)
+                return self._explore(user_message, candidates, exclude=exclude, meter=meter)
             except Exception as e:
                 print(f"[capital_rag] Explorer failed: {e}")
                 return []
@@ -1120,12 +1259,13 @@ class Pipeline:
             if suggestions:
                 reason = f"{reason} – {len(suggestions)} verwandte Themen gefunden"
             yield from step(reason, done=True)
+            yield from summary()
             yield from close_log()
             yield NO_ANSWER
             yield from related_block(suggestions)
 
         yield from step("Durchsuche die Quellen …")
-        candidates = self._fusion_candidates(user_message)
+        candidates = self._fusion_candidates(user_message, meter)
         yield from step(f"{len(candidates)} Kandidaten gefunden")
         expanded = self._graph_expand(candidates)
         if len(expanded) > len(candidates):
@@ -1137,7 +1277,7 @@ class Pipeline:
         if self.valves.CHAIN_SEARCH and self.concept_vectors is not None:
             yield from step("Suche Wirkungsketten im Konzeptgraphen …")
             try:
-                paths = self._causal_paths(user_message)
+                paths = self._causal_paths(user_message, meter)
             except Exception as e:
                 print(f"[capital_rag] Chain search failed: {e}")
             if paths:
@@ -1151,7 +1291,7 @@ class Pipeline:
         grounded = []
         if candidates:
             yield from step(f"Bewerte die Relevanz von {len(candidates)} Abschnitten …")
-            grounded = self._grade(user_message, candidates, path_ids)
+            grounded = self._grade(user_message, candidates, path_ids, meter)
 
         if not grounded:
             yield from no_answer("Keine relevanten Abschnitte gefunden")
@@ -1220,7 +1360,7 @@ class Pipeline:
             # Never show an unchecked answer: if the check itself fails, refuse.
             answer, has_facts = None, False
             try:
-                for kind, value, detail in self._grounded_answer(user_message, context, blocks):
+                for kind, value, detail in self._grounded_answer(user_message, context, blocks, meter):
                     if kind == "status":
                         yield from step(value, detail)
                     else:
@@ -1239,7 +1379,7 @@ class Pipeline:
             elif self.valves.CORROBORATE and len(blocks) > 1:
                 yield from step("Suche weitere Belege in den anderen Quellen …")
                 try:
-                    answer, added = self._corroborate(answer, context, blocks)
+                    answer, added = self._corroborate(answer, context, blocks, meter)
                     if added:
                         yield from step(f"{added} weitere Beleg(e) aus anderen Quellen ergänzt")
                 except Exception as e:
@@ -1247,6 +1387,7 @@ class Pipeline:
                     print(f"[capital_rag] Corroboration failed: {e}")
             cited = cited_numbers(answer, len(grounded))
             yield from step(f"Antwort geprüft ✓ ({len(cited)} Quellen)", done=True)
+            yield from summary()
             yield from close_log()
             yield answer
         else:
@@ -1254,12 +1395,14 @@ class Pipeline:
             yield from close_log()
             answer = ""
             for chunk in self.llm.stream(
-                ANSWER_PROMPT.format(context=context, question=user_message)
+                ANSWER_PROMPT.format(context=context, question=user_message), config=run_config(meter)
             ):
                 if chunk.content:
                     answer += chunk.content
                     yield chunk.content
             cited = cited_numbers(answer, len(grounded))
+            # After the stream, so the streamed answer is counted too.
+            yield from summary()
 
         # Only the sources the answer actually cites, under their citation numbers.
         source_lines = []
