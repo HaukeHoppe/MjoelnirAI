@@ -92,6 +92,13 @@ check "deploys c3 although valves.json was changed at runtime" 0 deploy "$C3"
 check "  Caddyfile changed: caddy restarted" 0 called "restart caddy"
 check "  c3 is checked out" 0 head_is "$C3"
 check "  runtime valves kept" 0 grep -q SHOW_COSTS "$VALVES"
+# A large diff (more than the 64 KB pipe buffer after the matching path) must still detect the pipeline change.
+git checkout -q main
+mkdir -p zz && for i in $(seq 6000); do echo "$i" >"zz/file-$i.txt"; done
+echo p4 >pipelines-capital/p.py && git add -A && git commit -qm c4 && git push -q origin HEAD:main
+C4=$(git rev-parse HEAD)
+check "deploys c4 with a large diff" 0 deploy "$C4"
+check "  pipeline change detected in the large diff" 0 called "restart pipelines-capital"
 
 echo "$passed passed, $failed failed"
 [[ $failed == 0 ]]
