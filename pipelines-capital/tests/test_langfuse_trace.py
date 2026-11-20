@@ -90,10 +90,57 @@ def test_question_becomes_one_trace(pipeline):
     assert pipeline.handlers == [("handler", {"trace_id": span.trace_id, "parent_span_id": span.id})]
 
 
-def test_only_user_id_and_role_leave_the_server(pipeline):
+def test_only_the_role_leaves_the_server(pipeline):
+    # Keine Nutzerkennung: weder ID noch Name oder E-Mail, nur die Rolle als Tag.
     run(pipeline)
-    assert pipeline.attributes == [{"user_id": "u-1", "tags": ["role:user"], "trace_name": "capital-rag"}]
-    assert "guest@example.com" not in repr(pipeline.langfuse.spans[0].start)
+    assert pipeline.attributes == [{"tags": ["role:user"], "trace_name": "capital-rag"}]
+    sent = repr(pipeline.langfuse.spans[0].start)
+    assert "u-1" not in sent
+    assert "guest@example.com" not in sent
+
+
+@pytest.mark.parametrize(
+    ("text", "masked"),
+    [
+        ("Schreib an max.muster@firma.de bitte", "Schreib an [E-MAIL] bitte"),
+        ("Meine IBAN DE89 3704 0044 0532 0130 00 lautet", "Meine IBAN [IBAN] lautet"),
+        ("IBAN DE89370400440532013000.", "IBAN [IBAN]."),
+        ("Karte 4111 1111 1111 1111 gesperrt", "Karte [KARTENNUMMER] gesperrt"),
+        ("Ruf an: +49 30 1234567 oder 030/1234567", "Ruf an: [TELEFON] oder [TELEFON]"),
+        ("Mobil 0171 2345678.", "Mobil [TELEFON]."),
+        ("Server 192.168.1.20 antwortet", "Server [IP] antwortet"),
+        ("Link https://x.de/a?token=abc&u=1 ok", "Link https://x.de/a?[PARAMETER] ok"),
+    ],
+)
+def test_mask_removes_personal_data(text, masked):
+    assert crp.mask_personal_data(data=text) == masked
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Der Leitzins stieg 2022 um 0,75 Prozentpunkte auf 4,5 % (2008 2009 2010 2011).",
+        "Der S&P 500 fiel von 4.796 auf 3.577 Punkte; das BIP wuchs um +2,1 %.",
+        "Quantitative Lockerung (QE) senkt die Renditen langfristiger Anleihen [1, 3].",
+        "Die EZB kaufte 2015-2018 Anleihen für 2.600 Mrd. Euro; Basel III, Stufe 1.2.",
+        "Siehe https://de.wikipedia.org/wiki/Quantitative_Lockerung für Details.",
+        "Ticker AAPL, MSFT und ISIN-Anteile von 12.5 % am MSCI World.",
+        "Die Bilanzsumme betrug 3.210.000.000 Euro bzw. 1.234.567 Anteile.",
+    ],
+)
+def test_mask_keeps_financial_text(text):
+    # Kapitalmarkttexte mit Zahlen, Jahren, Prozenten und Links dürfen nicht verfälscht werden.
+    assert crp.mask_personal_data(data=text) == text
+
+
+def test_mask_walks_nested_data():
+    data = {"messages": [{"role": "user", "content": "a@b.de"}], "n": 3, "x": None, "t": ("c@d.de",)}
+    assert crp.mask_personal_data(data=data) == {
+        "messages": [{"role": "user", "content": "[E-MAIL]"}],
+        "n": 3,
+        "x": None,
+        "t": ["[E-MAIL]"],
+    }
 
 
 def test_no_answer_scores_zero(pipeline):

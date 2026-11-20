@@ -133,6 +133,47 @@ def run_config(meter, **extra) -> dict:
     return {**extra, **({"callbacks": list(meter.callbacks)} if meter else {})}
 
 
+def luhn(number: str) -> bool:
+    # Prüfsumme von Kartennummern (Luhn): unterscheidet sie von zufälligen Zahlenfolgen wie "2008 2009 2010 2011".
+    digits = [int(c) for c in number if c.isdigit()][::-1]
+    total = sum(d if i % 2 == 0 else (d * 2 - 9 if d > 4 else d * 2) for i, d in enumerate(digits))
+    return total % 10 == 0
+
+
+# Personal data that is removed from every Langfuse input, output and metadata before it leaves the server.
+# Order matters: IBAN and card numbers before phone numbers, which would otherwise match their digits.
+PERSONAL_DATA_PATTERNS = [
+    (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "[E-MAIL]"),
+    (re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\b"), "[IBAN]"),
+    (re.compile(r"\b\d{4}(?:[ -]?\d{4}){2}[ -]?\d{1,7}\b"), lambda m: "[KARTENNUMMER]" if luhn(m[0]) else m[0]),
+    (re.compile(r"(?<![\w,.])(?:\+|00)\d[\d /().-]{6,}\d|\b0\d{2,5}[ /-]?\d[\d -]{4,}\d\b"), "[TELEFON]"),
+    # IPv4 with valid octets only (no leading zeros), so German thousands like "3.210.000.000" stay as they are.
+    (
+        re.compile(
+            r"(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\d.]\d)"
+            r"|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b"
+        ),
+        "[IP]",
+    ),
+    (re.compile(r"(https?://[^\s?#]+)\?[^\s)\]>\"']+"), r"\1?[PARAMETER]"),
+]
+
+
+def mask_personal_data(*, data, **kwargs):
+    # Maskierungsfunktion für das Langfuse-SDK: ersetzt in allen Texten (auch verschachtelt in Listen und
+    # Dicts) E-Mail-Adressen, IBANs, Kartennummern, Telefonnummern, IP-Adressen und URL-Parameter durch
+    # Platzhalter, bevor ein Trace den Server verlässt. Andere Werte (Zahlen, None) bleiben unverändert.
+    if isinstance(data, str):
+        for pattern, replacement in PERSONAL_DATA_PATTERNS:
+            data = pattern.sub(replacement, data)
+        return data
+    if isinstance(data, dict):
+        return {key: mask_personal_data(data=value) for key, value in data.items()}
+    if isinstance(data, list | tuple):
+        return [mask_personal_data(data=value) for value in data]
+    return data
+
+
 class Grade(BaseModel):
     relevance: int = Field(..., ge=0, le=10, description="Relevance to the question, 0-10.")
     supports_answer: bool = Field(..., description="True only if the document directly helps answer the question.")
@@ -696,7 +737,8 @@ class Pipeline:
             self.langfuse = None
             return
         try:
-            self.langfuse = Langfuse()
+            # mask: the SDK runs every input, output and metadata through it before sending.
+            self.langfuse = Langfuse(mask=mask_personal_data)
             print("[capital_rag] Langfuse tracing enabled")
         except Exception as e:  # noqa: BLE001 - tracing is optional, the pipeline runs without it
             print(f"[capital_rag] Langfuse disabled: {e}")
@@ -706,13 +748,12 @@ class Pipeline:
         # Legt den Wurzel-Span einer Frage an und einen LangChain-Handler, der alle Aufrufe darunter hängt.
         # Explizite trace_context statt OpenTelemetry-Kontext: pipe() ist ein Generator und grader.batch()
         # läuft in Threads, ein "aktueller" Span ginge zwischen den Schritten verloren.
-        # Nutzer: nur die interne Open-WebUI-ID und die Rolle, nie Name oder E-Mail.
+        # Nutzer: keine Kennung (weder ID noch Name oder E-Mail), nur die Rolle als Tag (Gast oder Admin).
         if self.langfuse is None:
             return None
         user = body.get("user") or {}
         try:
             with propagate_attributes(
-                user_id=user.get("id"),
                 tags=[f"role:{user['role']}"] if user.get("role") else None,
                 trace_name="capital-rag",
             ):

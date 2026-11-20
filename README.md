@@ -483,9 +483,13 @@ marks the trace as `WARNING`, a pipeline error as `ERROR`.
 3. `docker compose up -d pipelines-capital` (recreates the container with the new variables). The log shows
    `[capital_rag] Langfuse tracing enabled`.
 
-Only the internal Open WebUI user ID and the role are sent as user attributes, never name or email; the question
-text itself is part of the trace. Before enabling it on the public site, add Langfuse to the privacy policy
-(`legal/datenschutz.html`) and conclude its data processing agreement. Tracing never blocks an answer: without keys,
+No user identifier is sent (no ID, name or email), only the role as a tag (`role:user` for guests, `role:admin`).
+Before anything leaves the server, the SDK runs every input, output and metadata through `mask_personal_data`:
+email addresses, IBANs, card numbers (Luhn-checked), phone numbers, IP addresses and URL parameters become
+placeholders such as `[E-MAIL]`. The patterns leave financial text alone (checked against all 10,177 texts of the
+public index: no change). Masking catches these patterns, not every personal detail in free text (names, places),
+so the traces are treated as personal data: Langfuse is in the privacy policy (`legal/datenschutz.html`) with its
+data processing agreement. Tracing never blocks an answer: without keys,
 with `LANGFUSE_ENABLED` off, or when Langfuse is unreachable the pipeline answers as before.
 
 ---
