@@ -19,6 +19,7 @@ mkdir -p "$WORK/stub"
 cat >"$WORK/stub/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $*" >>"$CALLS"
+[[ "$*" == "compose up"* ]] && echo "APP_VERSION=${APP_VERSION:-}" >>"$CALLS"
 if [[ "$*" == *"exec open-webui-pipelines-capital"* && -n "${FAIL_HEALTH:-}" ]] \
 	&& [[ "$(git -C "$APP_DIR" rev-parse HEAD)" == "$FAIL_HEALTH" ]]; then
 	exit 1
@@ -42,6 +43,7 @@ commit pipelines-capital/capital_rag_pipeline/valves.json '{}' c0 >/dev/null
 C1=$(commit Caddyfile a c1)
 C2=$(commit pipelines-capital/p.py p2 c2)
 C3=$(commit Caddyfile b c3)
+git tag v1.0.0 "$C2" && git push -q origin v1.0.0
 git checkout -qb other
 OTHER=$(commit x x other)
 git clone -q "$WORK/origin.git" "$APP_DIR"
@@ -75,6 +77,7 @@ check "deploys c2" 0 deploy "$C2"
 check "  c2 is checked out" 0 head_is "$C2"
 check "  pipeline changed: pipelines-capital restarted" 0 called "restart pipelines-capital"
 check "  Caddyfile unchanged: caddy not restarted" 1 called "restart caddy"
+check "  release tag passed on as APP_VERSION" 0 called "APP_VERSION=v1.0.0$"
 check "same commit again: health check only" 0 deploy "$C2"
 check "refuses the older c1" 1 deploy "$C1"
 check "  c2 still checked out" 0 head_is "$C2"
