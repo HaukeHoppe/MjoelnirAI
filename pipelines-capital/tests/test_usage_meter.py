@@ -107,3 +107,11 @@ def test_run_config_without_meter_is_unchanged():
     assert run_config(None, max_concurrency=8) == {"max_concurrency": 8}
     meter = UsageMeter(DEFAULT_PRICES)
     assert run_config(meter) == {"callbacks": [meter]}
+
+
+def test_run_config_passes_extra_callbacks():
+    # Der Langfuse-Handler hängt am Zähler und erreicht so jeden LLM-Aufruf der Frage.
+    meter = UsageMeter(DEFAULT_PRICES)
+    handler = object()
+    meter.callbacks.append(handler)
+    assert run_config(meter, max_concurrency=8) == {"max_concurrency": 8, "callbacks": [meter, handler]}

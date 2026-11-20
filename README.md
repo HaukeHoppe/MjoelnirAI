@@ -46,7 +46,7 @@ Kurs einer Anleihe (bond price). Click the image to open it.</sub>
 - [Graph explorer (TypeScript)](#graph-explorer-typescript)
 - [Setup](#setup)
 - [Configuration](#configuration)
-- [Debugging](#debugging)
+- [Debugging](#debugging) · [Tracing with Langfuse](#tracing-with-langfuse)
 - [Tests and CI](#tests-and-ci)
 - [Repository layout](#repository-layout)
 - [Known limitations](#known-limitations)
@@ -447,6 +447,7 @@ Valves are edited in **Admin Panel → Settings → Pipelines**. The pipeline re
 | `CORROBORATE` · `CORROBORATE_MAX_PER_LINE` | `True` · 2 | After the check, cite further blocks stating the same step |
 | `SHOW_THINKING_LOG` | `False` | Full step log including rejected claims in the chat |
 | `EXPLORE_MODE` · `EXPLORE_SUGGESTIONS` · `EXPLORE_MIN_CHUNKS` | `True` · 4 · 2 | Related-topic suggestions |
+| `LANGFUSE_ENABLED` | `True` | Langfuse tracing; only active with the `LANGFUSE_*` keys in `.env` (see [Tracing with Langfuse](#tracing-with-langfuse)) |
 
 **Tuning:**
 
@@ -467,6 +468,29 @@ When an answer is missing, find which stage is responsible:
 - **Retrieval:** the right chunk never appears among the candidates.
 - **Grading:** the chunk was found but rejected. Check its relevance score and reason.
 - **Checking:** the claims were removed. The rejected claims are listed with the reason for each.
+
+### Tracing with Langfuse
+
+With [Langfuse](https://langfuse.com) (EU cloud) every question becomes one trace: the question, the answer shown,
+and every LLM step below it (question concepts, grading of each chunk, chain search, answer, claim check, revision,
+corroboration) with full prompt, response, tokens, latency and cost. Background tasks (chat titles, tags) are not
+traced. The score `answered` (1 = sourced answer, 0 = refusal) filters the unanswered questions; a closed chat
+marks the trace as `WARNING`, a pipeline error as `ERROR`.
+
+1. Create a project at [cloud.langfuse.com](https://cloud.langfuse.com) (EU region) and an API key pair.
+2. Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env`; on the VPS also
+   `LANGFUSE_TRACING_ENVIRONMENT=production`, so local and server traces stay apart.
+3. `docker compose up -d pipelines-capital` (recreates the container with the new variables). The log shows
+   `[capital_rag] Langfuse tracing enabled`.
+
+No user identifier is sent (no ID, name or email), only the role as a tag (`role:user` for guests, `role:admin`).
+Before anything leaves the server, the SDK runs every input, output and metadata through `mask_personal_data`:
+email addresses, IBANs, card numbers (Luhn-checked), phone numbers, IP addresses and URL parameters become
+placeholders such as `[E-MAIL]`. The patterns leave financial text alone (checked against all 10,177 texts of the
+public index: no change). Masking catches these patterns, not every personal detail in free text (names, places),
+so the traces are treated as personal data: Langfuse is in the privacy policy (`legal/datenschutz.html`) with its
+data processing agreement. Tracing never blocks an answer: without keys,
+with `LANGFUSE_ENABLED` off, or when Langfuse is unreachable the pipeline answers as before.
 
 ---
 
