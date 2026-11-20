@@ -107,8 +107,11 @@ main() {
 	if git merge-base --is-ancestor "$sha" "$prev"; then
 		fail "$sha is older than the deployed $prev"
 	fi
-	# Hand edits on the server would be overwritten: stop and let a human decide.
-	[[ -z $(git status --porcelain --untracked-files=no) ]] || fail "local changes on the server: $(git status --short --untracked-files=no | tr '\n' ' ')"
+	# Hand edits on the server would be overwritten: stop and let a human decide. valves.json is runtime state
+	# (the pipelines server writes it when valves are changed in Open WebUI); git keeps it across the checkout.
+	local edits
+	edits=$(git status --short --untracked-files=no -- . ':!pipelines-capital/*/valves.json')
+	[[ -z $edits ]] || fail "local changes on the server: $(tr '\n' ' ' <<<"$edits")"
 
 	log "deploying $sha (was $prev)"
 	if apply "$prev" "$sha" && healthy; then

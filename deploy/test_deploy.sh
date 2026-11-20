@@ -37,7 +37,8 @@ git init -q --bare "$WORK/origin.git"
 git clone -q "$WORK/origin.git" "$WORK/dev" 2>/dev/null
 cd "$WORK/dev" || exit 1
 commit() { echo "$2" >"$1" && git add "$1" && git commit -qm "$3" && git push -q origin HEAD && git rev-parse HEAD; }
-mkdir pipelines-capital
+mkdir -p pipelines-capital/capital_rag_pipeline
+commit pipelines-capital/capital_rag_pipeline/valves.json '{}' c0 >/dev/null
 C1=$(commit Caddyfile a c1)
 C2=$(commit pipelines-capital/p.py p2 c2)
 C3=$(commit Caddyfile b c3)
@@ -84,9 +85,13 @@ check "  rollback in the log" 0 grep -q "rolled back to $C2" "$LOG_FILE"
 echo edit >>"$APP_DIR/Caddyfile"
 check "refuses to overwrite local edits" 1 deploy "$C3"
 git -C "$APP_DIR" checkout -q -- Caddyfile
-check "deploys c3" 0 deploy "$C3"
+# Valves changed in Open WebUI: the pipelines server rewrote valves.json; that must not block a deployment.
+VALVES=$APP_DIR/pipelines-capital/capital_rag_pipeline/valves.json
+echo '{"SHOW_COSTS": false}' >"$VALVES"
+check "deploys c3 although valves.json was changed at runtime" 0 deploy "$C3"
 check "  Caddyfile changed: caddy restarted" 0 called "restart caddy"
 check "  c3 is checked out" 0 head_is "$C3"
+check "  runtime valves kept" 0 grep -q SHOW_COSTS "$VALVES"
 
 echo "$passed passed, $failed failed"
 [[ $failed == 0 ]]
