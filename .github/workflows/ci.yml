@@ -89,8 +89,9 @@ jobs:
             -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy-ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       # Das Deploy-Skript läuft als root auf dem Server: ShellCheck findet Quoting- und Logikfehler vorab.
+      # Pinned image instead of the runner's shellcheck, so CI and a local run report the same findings.
       - name: ShellCheck deploy script
-        run: shellcheck deploy/*.sh
+        run: docker run --rm -v "$PWD/deploy:/mnt:ro" koalaman/shellcheck:v0.11.0 /mnt/deploy.sh /mnt/test_deploy.sh
       # Ablauf des Deploy-Skripts gegen ein lokales git-Repo mit Stubs für docker und curl (inkl. Rollback).
       - name: Deploy script tests
         run: bash deploy/test_deploy.sh
