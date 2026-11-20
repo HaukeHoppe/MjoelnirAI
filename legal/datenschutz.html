@@ -367,9 +367,13 @@
 			Um Fehler zu finden und die Qualität der Antworten zu verbessern, protokollieren wir den Ablauf jeder Anfrage
 			an den KI-Chat mit dem Dienst Langfuse. Dabei werden Ihre Eingabe, die Ihnen angezeigte Antwort sowie die
 			einzelnen Verarbeitungsschritte (an das KI-Modell gesendete Texte und dessen Antworten, Bewertungen der
-			Textauszüge, Zeitpunkte, Verarbeitungsdauer, Tokenverbrauch und Kosten) gespeichert. Als Nutzerkennung wird
-			nur die interne, pseudonyme Kennung des gemeinsamen Gast-Zugangs übermittelt. Ihre IP-Adresse wird nicht an
-			Langfuse übermittelt; unser Server sendet die Daten, Ihr Browser stellt keine Verbindung zu Langfuse her.
+			Textauszüge, Zeitpunkte, Verarbeitungsdauer, Tokenverbrauch und Kosten) gespeichert. Vor der Übermittlung
+			entfernt unser Server automatisch erkennbare personenbezogene Angaben aus allen Texten und ersetzt sie durch
+			Platzhalter: E-Mail-Adressen, Telefonnummern, IBANs, Kartennummern, IP-Adressen und Parameter in
+			Internetadressen. Andere Angaben in Ihrer Eingabe, etwa Namen, werden dabei nicht in jedem Fall erkannt. Es wird
+			keine Nutzerkennung übermittelt, sondern nur, ob die Anfrage über den Gast-Zugang oder den
+			Administrator-Zugang gestellt wurde. Ihre IP-Adresse wird nicht an Langfuse übermittelt; unser Server sendet
+			die Daten, Ihr Browser stellt keine Verbindung zu Langfuse her.
 		</p>
 		<p>
 			Anbieter ist die ClickHouse, Inc., 4113 Alpine Road, Portola Valley, CA 94028, USA, die Langfuse gemeinsam
