@@ -1,0 +1,8 @@
+# Development and CI: the pipeline's runtime dependencies plus the test and lint tools.
+#   python -m venv .venv && .venv/Scripts/activate   (Linux/macOS: source .venv/bin/activate)
+#   pip install -r requirements-dev.txt
+#   ruff check . && pytest
+-r requirements.txt
+pytest>=8
+# Pinned so local hooks and CI report the same findings; bump deliberately.
+ruff==0.17.5

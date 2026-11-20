@@ -1,0 +1,18 @@
+# Tool settings only (the project is not an installable package). One source for the lint rules
+# and test paths used by the CI workflow, the git pre-commit hook and the editor.
+
+[tool.ruff]
+# Same Python as the pipelines container (ghcr.io/open-webui/pipelines).
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# Bug-class rules only: F (pyflakes: undefined names, unused imports/variables), E9 (syntax errors)
+# and B (bugbear). Style rules stay off so existing code is not pushed into reformatting.
+select = ["F", "E9", "B"]
+# zip() without strict=: the code zips unequal lengths on purpose, e.g. zip(path, path[1:]).
+ignore = ["B905"]
+
+[tool.pytest.ini_options]
+testpaths = ["pipelines-capital/tests"]
+addopts = "-q"
