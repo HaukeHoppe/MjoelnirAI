@@ -152,6 +152,8 @@ services:
       - ACME_EMAIL=${ACME_EMAIL:-}
       - GUEST_EMAIL=${GUEST_EMAIL:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      # Version in the legal footer; deploy/deploy.sh sets it from git describe (e.g. v0.9.1), unset = "dev".
+      - APP_VERSION=${APP_VERSION:-dev}
 
     restart: always
     logging: *logging

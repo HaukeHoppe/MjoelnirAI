@@ -365,7 +365,8 @@ certificate and forwards to Open WebUI on the internal network ([`Caddyfile`](Ca
    the server (it stops instead of overwriting them);
 2. checks out the commit, builds all images first (a failed build changes nothing), runs `docker compose up -d`,
    validates and restarts Caddy if `Caddyfile`/`guest.css` changed, restarts `pipelines-capital` if the pipeline
-   changed;
+   changed; the version from `git describe --tags` (e.g. `v0.9.1`) goes to Caddy as `APP_VERSION` and shows left
+   of "Impressum" in the footer (a manual `docker compose up -d` on the server resets it to `dev`);
 3. health checks: Open WebUI `/health`, the pipeline listed by the pipelines server, graph explorer, Caddy; then
    `https://<domain>/health` from GitHub;
 4. if a check fails, it checks out the previous commit, restarts the same way and marks the run as failed.

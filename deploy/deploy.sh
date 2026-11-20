@@ -72,6 +72,9 @@ apply() {
 	local from=$1 to=$2
 	git checkout --quiet --detach "$to" || return 1
 	log "checked out $(git log -1 --format='%h %s' "$to")"
+	# Version for the footer (tag such as v0.9.1, or tag-N-gSHA between releases); a change recreates Caddy.
+	APP_VERSION=$(git describe --tags --always "$to") || return 1
+	export APP_VERSION
 	docker compose build --quiet || { log "image build failed"; return 1; }
 	docker compose up -d --quiet-pull || { log "docker compose up failed"; return 1; }
 	if changed "$from" "$to" '^(Caddyfile|guest\.css)$'; then
@@ -96,7 +99,7 @@ main() {
 	flock -w 600 9 || fail "another deployment is still running"
 	cd "$APP_DIR"
 
-	git fetch --quiet origin main
+	git fetch --quiet --tags origin main
 	git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on origin/main"
 	local prev
 	prev=$(git rev-parse HEAD)
