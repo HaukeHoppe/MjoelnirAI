@@ -32,9 +32,7 @@ class Starter(BaseModel):
     # Lengths are set by the prompt (short topic suggestions vs. long chain questions).
     title: str = Field(..., description="Topic name, German, as the prompt asks.")
     subtitle: str = Field(..., description="Second line shown under the title, German, as the prompt asks.")
-    question: str = Field(
-        ..., description="The question in German that the text answers, as a user would ask it."
-    )
+    question: str = Field(..., description="The question in German that the text answers, as a user would ask it.")
 
 
 STARTER_PROMPT = """Below is a summary of a topic from a capital-markets knowledge base.
@@ -108,10 +106,7 @@ def main():
     )
     pairs = [(s, st) for s, st in zip(topics, starters) if not isinstance(st, Exception)]
     grades = llm.with_structured_output(Grade).batch(
-        [
-            GRADE_PROMPT.format(question=st.question, title=s["title"], content=s["content"])
-            for s, st in pairs
-        ],
+        [GRADE_PROMPT.format(question=st.question, title=s["title"], content=s["content"]) for s, st in pairs],
         config={"max_concurrency": 8},
         return_exceptions=True,
     )

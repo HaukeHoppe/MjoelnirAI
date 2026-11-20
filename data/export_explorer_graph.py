@@ -34,9 +34,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--index_dir", default=os.path.join(HERE, "faiss_public_index"))
     parser.add_argument("--out", default=os.path.join(HERE, "explorer", "graph.json"))
-    parser.add_argument(
-        "--allow_private", action="store_true", help="export an index other than faiss_public_index"
-    )
+    parser.add_argument("--allow_private", action="store_true", help="export an index other than faiss_public_index")
     return parser.parse_args()
 
 
@@ -73,7 +71,11 @@ def german_score(form: str) -> int:
     # German ones only the nouns ("Rechte der Aktionäre" vs. "First Shares To Outsiders").
     words = form.split()
     score = 2 if re.search(r"[äöüß]", form, re.I) else 0
-    score += 2 if any(w in {"der", "die", "das", "des", "den", "dem", "und", "von", "im", "am", "zur", "zum"} for w in words) else 0
+    score += (
+        2
+        if any(w in {"der", "die", "das", "des", "den", "dem", "und", "von", "im", "am", "zur", "zum"} for w in words)
+        else 0
+    )
     score += 1 if len(words) == 1 or not all(w[:1].isupper() for w in words) else 0
     return score
 

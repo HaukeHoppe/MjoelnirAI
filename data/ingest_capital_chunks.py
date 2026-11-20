@@ -57,9 +57,7 @@ def parse_args():
         description="Build a LangChain FAISS index from capital-markets extracted_v2_all.json."
     )
     parser.add_argument("--index_dir", default=DEFAULT_INDEX_DIR)
-    parser.add_argument(
-        "--chunks", default=None, help="Defaults to <index_dir>/extracted_v2_all.json"
-    )
+    parser.add_argument("--chunks", default=None, help="Defaults to <index_dir>/extracted_v2_all.json")
     # Must match CAPITAL_EMBEDDING_MODEL in the pipeline's valves.
     parser.add_argument("--embedding_model", default="text-embedding-3-large")
     parser.add_argument("--llm_model", default="gpt-4o-mini")
@@ -117,11 +115,7 @@ def classify_chunks(chunks: list, llm: ChatOpenAI, cache_path: str) -> dict:
         with open(cache_path, encoding="utf-8") as f:
             cache = json.load(f)
 
-    todo = [
-        c
-        for c in chunks
-        if cache.get(str(c["id"]), {}).get("hash") != content_hash(c)
-    ]
+    todo = [c for c in chunks if cache.get(str(c["id"]), {}).get("hash") != content_hash(c)]
     print(f"Classifying {len(todo)} chunks ({len(chunks) - len(todo)} cached) ...")
     if todo:
         classifier = llm.with_structured_output(ChunkClass)
@@ -229,9 +223,7 @@ def video_of(source: str) -> str:
     return re.sub(r"\s*#\d+$", "", source)
 
 
-def build_summaries(
-    chunks: list, classes: dict, primary_vectors: dict, llm: ChatOpenAI, similarity: float
-) -> list:
+def build_summaries(chunks: list, classes: dict, primary_vectors: dict, llm: ChatOpenAI, similarity: float) -> list:
     concept_chunks = [c for c in chunks if classes[c["id"]]["content_class"] == "concept"]
     if len(concept_chunks) < 2:
         return []
@@ -261,8 +253,7 @@ def build_summaries(
         [
             SUMMARIZE_PROMPT.format(
                 passages="\n\n---\n\n".join(
-                    f"[{video_of(c['sources'][0])}] {c['title']}\n{c['content']}"
-                    for c in members
+                    f"[{video_of(c['sources'][0])}] {c['title']}\n{c['content']}" for c in members
                 )
             )
             for members in clusters
@@ -382,17 +373,12 @@ def main():
     # timeout: a single hanging request otherwise blocks its whole batch forever (seen during the
     # relation classification); after 60 s it is retried like a rate-limited one.
     llm = ChatOpenAI(model=args.llm_model, temperature=0, max_retries=30, timeout=60)
-    classes = classify_chunks(
-        chunks, llm, os.path.join(args.index_dir, "chunk_classes.json")
-    )
+    classes = classify_chunks(chunks, llm, os.path.join(args.index_dir, "chunk_classes.json"))
     n_opinion = sum(1 for c in classes.values() if c["content_class"] == "opinion")
     print(f"  {len(classes) - n_opinion} concept, {n_opinion} opinion")
     classify_relations(chunks, llm, os.path.join(args.index_dir, "relation_classes.json"))
     rel_classes = [r["relation_class"] for c in chunks for r in c["relations"]]
-    print(
-        f"  {rel_classes.count('timeless')} timeless, "
-        f"{rel_classes.count('time-bound')} time-bound relations"
-    )
+    print(f"  {rel_classes.count('timeless')} timeless, {rel_classes.count('time-bound')} time-bound relations")
 
     embed_inputs, contents, metadatas = [], [], []
     primary_positions = {}
@@ -401,21 +387,14 @@ def main():
         for text in [chunk["embedding_text"], *chunk["hypothetical_questions"]]:
             embed_inputs.append(text)
             contents.append(chunk["content"])
-            metadatas.append(
-                {**chunk_metadata(chunk, classes[chunk["id"]]), "matched_text": text}
-            )
+            metadatas.append({**chunk_metadata(chunk, classes[chunk["id"]]), "matched_text": text})
 
-    print(
-        f"Embedding {len(embed_inputs)} texts for {len(chunks)} chunks "
-        f"with {args.embedding_model} ..."
-    )
+    print(f"Embedding {len(embed_inputs)} texts for {len(chunks)} chunks with {args.embedding_model} ...")
     embeddings = OpenAIEmbeddings(model=args.embedding_model, max_retries=10, timeout=120)
     vectors = embeddings.embed_documents(embed_inputs)
 
     primary_vectors = {cid: vectors[pos] for cid, pos in primary_positions.items()}
-    summaries = build_summaries(
-        chunks, classes, primary_vectors, llm, args.cluster_similarity
-    )
+    summaries = build_summaries(chunks, classes, primary_vectors, llm, args.cluster_similarity)
     if summaries:
         summary_vectors = embeddings.embed_documents([s["content"] for s in summaries])
         for summary, vector in zip(summaries, summary_vectors):
@@ -443,10 +422,7 @@ def main():
     graph_path = os.path.join(args.index_dir, "graph.json")
     with open(graph_path, "w", encoding="utf-8") as f:
         json.dump(graph, f, ensure_ascii=False, indent=1)
-    print(
-        f"Saved concept graph ({len(graph['nodes'])} nodes, "
-        f"{len(graph['edges'])} edges) to {graph_path}"
-    )
+    print(f"Saved concept graph ({len(graph['nodes'])} nodes, {len(graph['edges'])} edges) to {graph_path}")
 
 
 if __name__ == "__main__":

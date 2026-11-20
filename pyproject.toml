@@ -6,6 +6,10 @@
 target-version = "py311"
 line-length = 120
 
+[tool.ruff.format]
+# Python files only: code blocks in the Markdown docs keep their hand-aligned comments.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 # Bug-class rules only: F (pyflakes: undefined names, unused imports/variables), E9 (syntax errors)
 # and B (bugbear). Style rules stay off so existing code is not pushed into reformatting.

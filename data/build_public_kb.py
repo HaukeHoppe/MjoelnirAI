@@ -50,6 +50,7 @@ WIKI_API = "https://de.wikipedia.org/w/api.php"
 USER_AGENT = "MjoelnirKB/1.0 (https://mjoelnir.ai/impressum)"
 
 # Neutral topic list: general capital-markets knowledge, written for this project.
+# fmt: off
 TOPICS = [
     # Instruments and markets
     "Aktie", "Anleihe", "Investmentfonds", "Exchange-traded Fund", "Indexfonds", "Aktienindex",
@@ -88,8 +89,10 @@ TOPICS = [
     # Taxes and saving (Germany)
     "Abgeltungsteuer", "Sparerpauschbetrag", "Vorabpauschale", "Altersvorsorge", "Kapitallebensversicherung",
 ]
+# fmt: on
 
 # Wikipedia only (no own text): articles on how shocks spread, the links between the topics above.
+# fmt: off
 WIKI_MECHANISMS = [
     "Nachschusspflicht", "Margin Call", "Deleveraging", "Flight to Quality", "Finanzielle Ansteckung",
     "Pensionsgeschäft", "Credit Spread", "Bank Run", "Kreditklemme", "Systemisches Risiko", "Prozyklizität",
@@ -99,6 +102,7 @@ WIKI_MECHANISMS = [
     "Schattenbank", "Verbriefung", "Collateralized Debt Obligation", "Credit Default Swap", "Fallen Angel",
     "Lohn-Preis-Spirale", "Crowding-out", "Zinsänderungsrisiko", "Liquiditätsfalle",
 ]
+# fmt: on
 
 # Own cause -> effect chains: how a trigger propagates through markets (written for this project).
 CHAIN_TOPICS = [
@@ -202,8 +206,19 @@ WIKI_OVERRIDES = {
 }
 
 SKIP_SECTIONS = {
-    "literatur", "weblinks", "einzelnachweise", "siehe auch", "anmerkungen", "quellen", "fußnoten",
-    "rezeption", "filme", "trivia", "belege", "weiterführende literatur", "nachweise",
+    "literatur",
+    "weblinks",
+    "einzelnachweise",
+    "siehe auch",
+    "anmerkungen",
+    "quellen",
+    "fußnoten",
+    "rezeption",
+    "filme",
+    "trivia",
+    "belege",
+    "weiterführende literatur",
+    "nachweise",
 }
 MAX_CHUNKS_PER_ARTICLE = 8
 TARGET_CHARS, MAX_CHARS, MIN_CHARS = 1800, 2600, 300
@@ -236,10 +251,18 @@ def resolve(topic: str):
 
 
 def fetch_article(title: str) -> dict:
-    page = wiki({
-        "action": "query", "titles": title, "redirects": 1, "prop": "extracts|info|revisions",
-        "explaintext": 1, "exsectionformat": "wiki", "inprop": "url", "rvprop": "ids",
-    })["query"]["pages"][0]
+    page = wiki(
+        {
+            "action": "query",
+            "titles": title,
+            "redirects": 1,
+            "prop": "extracts|info|revisions",
+            "explaintext": 1,
+            "exsectionformat": "wiki",
+            "inprop": "url",
+            "rvprop": "ids",
+        }
+    )["query"]["pages"][0]
     return {
         "title": page["title"],
         "url": page["fullurl"],
@@ -456,8 +479,11 @@ def lizenzen_html(articles: List[dict], own_topics: List[str]) -> str:
         f'<a href="{html.escape(a["url"])}?action=history" rel="noopener">Autoren</a>)</li>'
         for a in sorted(articles, key=lambda a: a["title"].lower())
     )
-    return LIZENZ_TEMPLATE.replace("{rows}", rows).replace("{n_articles}", str(len(articles))).replace(
-        "{n_own}", str(len(own_topics)))
+    return (
+        LIZENZ_TEMPLATE.replace("{rows}", rows)
+        .replace("{n_articles}", str(len(articles)))
+        .replace("{n_own}", str(len(own_topics)))
+    )
 
 
 # Control characters / replacement characters: gpt-4.1 occasionally emits umlauts as "\x1f" in long
@@ -489,8 +515,11 @@ def load_previous() -> dict:
 def generate(llm, label: str, items: List[tuple], previous: dict) -> List[dict]:
     # items: (source label, prompt, fixed content or None for generated texts). A previous chunk is
     # reused when its source matches and, for fixed content (Wikipedia), the content is unchanged.
-    todo = [(src, prompt) for src, prompt, content in items
-            if not (src in previous and (content is None or previous[src]["content"] == content))]
+    todo = [
+        (src, prompt)
+        for src, prompt, content in items
+        if not (src in previous and (content is None or previous[src]["content"] == content))
+    ]
     print(f"{label}: {len(items)} ({len(items) - len(todo)} from previous build, {len(todo)} new) ...")
     fresh = dict(zip([src for src, _ in todo], run_batch(llm, [p for _, p in todo]))) if todo else {}
     prompts = dict(todo)
@@ -527,22 +556,28 @@ def stage_build(model: str, chain_model: str):
     llm_own = ChatOpenAI(model=model, temperature=0.3, max_retries=10, timeout=120).with_structured_output(OwnText)
     # gpt-4.1 has a low tokens-per-minute limit on lower tiers: many retries, long timeout.
     llm_chain = ChatOpenAI(model=chain_model, temperature=0.3, max_retries=30, timeout=180).with_structured_output(
-        ChainText)
+        ChainText
+    )
 
     wiki_items = []
     for a in articles:
         for i, c in enumerate(a["chunks"]):
-            content = f'Aus dem Wikipedia-Artikel „{a["title"]}“ ({", ".join(c["sections"])}):\n\n{c["text"]}'
+            content = f"Aus dem Wikipedia-Artikel „{a['title']}“ ({', '.join(c['sections'])}):\n\n{c['text']}"
             prompt = META_PROMPT.format(article=a["title"], sections=", ".join(c["sections"]), text=c["text"])
             wiki_items.append((f"Wikipedia: {a['title']} #{i}", prompt, content))
-    own_items = [(f"Mjoelnir-Erklärtext: {short_name(t)} #0", OWN_PROMPT.format(topic=short_name(t)), None)
-                 for t in TOPICS]
-    chain_items = [(f"Mjoelnir-Wirkungskette: {short_name(t)} #0", CHAIN_PROMPT.format(topic=t), None)
-                   for t in CHAIN_TOPICS]
+    own_items = [
+        (f"Mjoelnir-Erklärtext: {short_name(t)} #0", OWN_PROMPT.format(topic=short_name(t)), None) for t in TOPICS
+    ]
+    chain_items = [
+        (f"Mjoelnir-Wirkungskette: {short_name(t)} #0", CHAIN_PROMPT.format(topic=t), None) for t in CHAIN_TOPICS
+    ]
 
     chunks = []
-    for label, llm, items in (("Wikipedia metadata", llm_meta, wiki_items), ("Own texts", llm_own, own_items),
-                              ("Cause -> effect chains", llm_chain, chain_items)):
+    for label, llm, items in (
+        ("Wikipedia metadata", llm_meta, wiki_items),
+        ("Own texts", llm_own, own_items),
+        ("Cause -> effect chains", llm_chain, chain_items),
+    ):
         for chunk in generate(llm, label, items, previous):
             chunk["id"] = len(chunks)
             chunks.append(chunk)
@@ -642,8 +677,10 @@ def graph_stats(chunks: List[dict]) -> str:
                     stack.append(other)
         largest = max(largest, size)
     once = sum(n == 1 for n in ends.values())
-    return (f"{len(ends)} relation ends, {once} used only once, "
-            f"largest connected part {largest} ({largest / max(len(ends), 1):.0%})")
+    return (
+        f"{len(ends)} relation ends, {once} used only once, "
+        f"largest connected part {largest} ({largest / max(len(ends), 1):.0%})"
+    )
 
 
 def embed_names(names: List[str]) -> np.ndarray:
@@ -654,9 +691,10 @@ def embed_names(names: List[str]) -> np.ndarray:
 def canonical_names(llm, todo: List[str], mapping: dict) -> int:
     # Name -> canonical English name. Only successful batches are cached; a failed batch keeps its names for
     # the next run instead of caching them unchanged (which left German names in the graph).
-    batches = [todo[i:i + 40] for i in range(0, len(todo), 40)]
-    results = run_batch(llm.with_structured_output(Canonical),
-                        [CANON_PROMPT.format(n=len(b), names="\n".join(b)) for b in batches])
+    batches = [todo[i : i + 40] for i in range(0, len(todo), 40)]
+    results = run_batch(
+        llm.with_structured_output(Canonical), [CANON_PROMPT.format(n=len(b), names="\n".join(b)) for b in batches]
+    )
     failed = 0
     for batch, result in zip(batches, results):
         if isinstance(result, Exception) or len(result.names) != len(batch):
@@ -666,8 +704,7 @@ def canonical_names(llm, todo: List[str], mapping: dict) -> int:
     return failed
 
 
-def anchor_names(llm, chunks: List[dict], final: dict, anchors_path: str, min_uses: int,
-                 min_similarity: float) -> dict:
+def anchor_names(llm, chunks: List[dict], final: dict, anchors_path: str, min_uses: int, min_similarity: float) -> dict:
     # Rare relation ends -> a core concept (an end used at least min_uses times, or an end of a chain text) that
     # means the same or is its general form, as confirmed by the LLM. Links the long tail of one-off names
     # ("Anstieg des Ölpreises") to the concepts the chains run through ("Oil Price Increase").
@@ -675,8 +712,13 @@ def anchor_names(llm, chunks: List[dict], final: dict, anchors_path: str, min_us
     cache = json.load(open(anchors_path, encoding="utf-8")) if os.path.exists(anchors_path) else {}
     uses = Counter(final[r[k]] for c in chunks for r in c["relations"] for k in ("source", "target"))
     core = {n for n, k in uses.items() if k >= min_uses}
-    core |= {final[r[k]] for c in chunks if any("Wirkungskette" in s for s in c["sources"])
-             for r in c["relations"] for k in ("source", "target")}
+    core |= {
+        final[r[k]]
+        for c in chunks
+        if any("Wirkungskette" in s for s in c["sources"])
+        for r in c["relations"]
+        for k in ("source", "target")
+    }
     core = sorted(core)
     rare = sorted(n for n in uses if n not in core)
     todo = [n for n in rare if n not in cache]
@@ -691,12 +733,14 @@ def anchor_names(llm, chunks: List[dict], final: dict, anchors_path: str, min_us
                 items.append((name, [core[i] for i in best]))
             else:
                 cache[name] = ""
-        batches = [items[i:i + 20] for i in range(0, len(items), 20)]
+        batches = [items[i : i + 20] for i in range(0, len(items), 20)]
         prompts = [
-            ANCHOR_PROMPT.format(items="\n\n".join(
-                f"{n}. {name}\n" + "\n".join(f"   {j}) {cand}" for j, cand in enumerate(cands, start=1))
-                for n, (name, cands) in enumerate(batch, start=1)
-            ))
+            ANCHOR_PROMPT.format(
+                items="\n\n".join(
+                    f"{n}. {name}\n" + "\n".join(f"   {j}) {cand}" for j, cand in enumerate(cands, start=1))
+                    for n, (name, cands) in enumerate(batch, start=1)
+                )
+            )
             for batch in batches
         ]
         results = run_batch(llm.with_structured_output(AnchorChoices), prompts)
@@ -711,13 +755,22 @@ def anchor_names(llm, chunks: List[dict], final: dict, anchors_path: str, min_us
     return {n: cache[n] for n in rare if cache.get(n)}
 
 
-def stage_normalize(model: str, similarity: float, out_dir: str, retranslate: bool, anchor_min_uses: int,
-                    anchor_similarity: float, anchor_model: str):
+def stage_normalize(
+    model: str,
+    similarity: float,
+    out_dir: str,
+    retranslate: bool,
+    anchor_min_uses: int,
+    anchor_similarity: float,
+    anchor_model: str,
+):
     path = f"{out_dir}/extracted_v2_all.json"
     chunks = json.load(open(path, encoding="utf-8"))
     print(f"Before: {graph_stats(chunks)}")
-    names = sorted({n for c in chunks for n in c["concepts"]}
-                   | {r[k] for c in chunks for r in c["relations"] for k in ("source", "target")})
+    names = sorted(
+        {n for c in chunks for n in c["concepts"]}
+        | {r[k] for c in chunks for r in c["relations"] for k in ("source", "target")}
+    )
     # concept_map.json caches name -> canonical name across builds.
     map_path = f"{out_dir}/concept_map.json"
     mapping = json.load(open(map_path, encoding="utf-8")) if os.path.exists(map_path) else {}
@@ -734,13 +787,15 @@ def stage_normalize(model: str, similarity: float, out_dir: str, retranslate: bo
 
     # 2. Near-duplicate canonical names (embedding clusters) are merged where the LLM confirms synonyms.
     canon = sorted(set(canonical.values()))
-    labels = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average",
-                                     distance_threshold=1 - similarity).fit_predict(embed_names(canon))
+    labels = AgglomerativeClustering(
+        n_clusters=None, metric="cosine", linkage="average", distance_threshold=1 - similarity
+    ).fit_predict(embed_names(canon))
     clusters = [c for c in ([canon[i] for i in np.where(labels == k)[0]] for k in set(labels)) if len(c) > 1]
     print(f"Merging: {len(canon)} canonical names, {len(clusters)} candidate clusters ...")
     merge = {}
-    results = run_batch(llm.with_structured_output(SynonymGroups),
-                        [GROUP_PROMPT.format(names="\n".join(c)) for c in clusters])
+    results = run_batch(
+        llm.with_structured_output(SynonymGroups), [GROUP_PROMPT.format(names="\n".join(c)) for c in clusters]
+    )
     for cluster, result in zip(clusters, results):
         if isinstance(result, Exception) or len(result.groups) != len(result.canonical):
             continue
@@ -754,8 +809,9 @@ def stage_normalize(model: str, similarity: float, out_dir: str, retranslate: bo
     if anchor_min_uses:
         # The stronger model: a wrong link joins unrelated chains, which a missed link does not.
         anchor_llm = ChatOpenAI(model=anchor_model, temperature=0, max_retries=10, timeout=180)
-        anchored = anchor_names(anchor_llm, chunks, final, f"{out_dir}/concept_anchors.json", anchor_min_uses,
-                                anchor_similarity)
+        anchored = anchor_names(
+            anchor_llm, chunks, final, f"{out_dir}/concept_anchors.json", anchor_min_uses, anchor_similarity
+        )
         final = {n: anchored.get(f, f) for n, f in final.items()}
         print(f"  {len(anchored)} rare relation ends linked to a core concept")
 
@@ -864,5 +920,12 @@ if __name__ == "__main__":
     elif args.stage == "build":
         stage_build(args.model, args.chain_model)
     else:
-        stage_normalize(args.model, args.similarity, args.out_dir, args.retranslate, args.anchor_min_uses,
-                        args.anchor_similarity, args.anchor_model)
+        stage_normalize(
+            args.model,
+            args.similarity,
+            args.out_dir,
+            args.retranslate,
+            args.anchor_min_uses,
+            args.anchor_similarity,
+            args.anchor_model,
+        )

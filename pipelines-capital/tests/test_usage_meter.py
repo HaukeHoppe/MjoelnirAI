@@ -92,8 +92,10 @@ def test_tiny_cost_is_shown_as_below_threshold():
 def test_parallel_calls_are_all_counted():
     # grader.batch() meldet aus mehreren Threads gleichzeitig; nichts darf verloren gehen.
     meter = UsageMeter(DEFAULT_PRICES)
-    threads = [threading.Thread(target=lambda: [meter.on_llm_end(result("gpt-4.1-mini", 1, 1)) for _ in range(200)])
-               for _ in range(8)]
+    threads = [
+        threading.Thread(target=lambda: [meter.on_llm_end(result("gpt-4.1-mini", 1, 1)) for _ in range(200)])
+        for _ in range(8)
+    ]
     for t in threads:
         t.start()
     for t in threads:

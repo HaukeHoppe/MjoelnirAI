@@ -93,11 +93,13 @@ class Judgement(BaseModel):
 
 
 def ask(question: str) -> str:
-    body = json.dumps({
-        "model": "capital_rag_pipeline",
-        "messages": [{"role": "user", "content": question}],
-        "stream": False,
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "model": "capital_rag_pipeline",
+            "messages": [{"role": "user", "content": question}],
+            "stream": False,
+        }
+    ).encode("utf-8")
     request = urllib.request.Request(
         "http://localhost:9099/v1/chat/completions",
         data=body,
@@ -135,18 +137,31 @@ def main():
         verdict = judge.invoke(JUDGE_PROMPT.format(question=question, answer=text))
         control = question in CONTROLS
         sources = cited_sources(answer)
-        results.append({"question": question, "control": control, "seconds": seconds, **verdict.model_dump(),
-                        "sources": sources, "answer": answer})
-        print(f"{'CONTROL ' if control else ''}steps {verdict.steps} complete {verdict.complete} depth {verdict.depth} "
-              f"refused {verdict.refused} sources {sources} {seconds:4d}s  {question[:60]}", flush=True)
+        results.append(
+            {
+                "question": question,
+                "control": control,
+                "seconds": seconds,
+                **verdict.model_dump(),
+                "sources": sources,
+                "answer": answer,
+            }
+        )
+        print(
+            f"{'CONTROL ' if control else ''}steps {verdict.steps} complete {verdict.complete} depth {verdict.depth} "
+            f"refused {verdict.refused} sources {sources} {seconds:4d}s  {question[:60]}",
+            flush=True,
+        )
         json.dump(results, open(args.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     chains = [r for r in results if not r["control"]]
     n = len(chains)
-    print(f"\nmean steps {sum(r['steps'] for r in chains) / n:.1f} | complete chains "
-          f"{sum(r['complete'] == 2 for r in chains)}/{n} | mean depth {sum(r['depth'] for r in chains) / n:.1f} "
-          f"| refused {sum(r['refused'] for r in chains)}/{n} | mean sources "
-          f"{sum(r['sources'] for r in chains) / n:.1f} (one source: {sum(r['sources'] == 1 for r in chains)}/{n}) | mean time {sum(r['seconds'] for r in chains) / n:.0f}s")
+    print(
+        f"\nmean steps {sum(r['steps'] for r in chains) / n:.1f} | complete chains "
+        f"{sum(r['complete'] == 2 for r in chains)}/{n} | mean depth {sum(r['depth'] for r in chains) / n:.1f} "
+        f"| refused {sum(r['refused'] for r in chains)}/{n} | mean sources "
+        f"{sum(r['sources'] for r in chains) / n:.1f} (one source: {sum(r['sources'] == 1 for r in chains)}/{n}) | mean time {sum(r['seconds'] for r in chains) / n:.0f}s"
+    )
     controls = [r for r in results if r["control"]]
     if controls:
         print(f"controls correctly not answered: {sum(r['refused'] for r in controls)}/{len(controls)}")

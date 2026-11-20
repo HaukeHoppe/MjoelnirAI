@@ -120,16 +120,12 @@ def run_config(meter, **extra) -> dict:
 
 class Grade(BaseModel):
     relevance: int = Field(..., ge=0, le=10, description="Relevance to the question, 0-10.")
-    supports_answer: bool = Field(
-        ..., description="True only if the document directly helps answer the question."
-    )
+    supports_answer: bool = Field(..., description="True only if the document directly helps answer the question.")
     states_step: bool = Field(
         ...,
         description="True if the document states at least one cause -> effect link of the chain the question asks about, even if it does not answer the whole question.",
     )
-    reason: str = Field(
-        ..., description="One short sentence, in the language of the question, why."
-    )
+    reason: str = Field(..., description="One short sentence, in the language of the question, why.")
 
 
 class Claim(BaseModel):
@@ -142,18 +138,12 @@ class Claim(BaseModel):
         ...,
         description="Verbatim passage copied from the context that states the claim; empty if none.",
     )
-    claim_cause: str = Field(
-        "", description="If the claim states a cause -> effect: the cause named in the claim."
-    )
+    claim_cause: str = Field("", description="If the claim states a cause -> effect: the cause named in the claim.")
     quote_cause: str = Field(
         "", description="If the claim states a cause -> effect: the cause the quote gives for that effect."
     )
-    same_cause: bool = Field(
-        True, description="False if claim_cause and quote_cause are different causes."
-    )
-    supported: bool = Field(
-        ..., description="fact: true only if the quote states it. meta: true if it is accurate."
-    )
+    same_cause: bool = Field(True, description="False if claim_cause and quote_cause are different causes.")
+    supported: bool = Field(..., description="fact: true only if the quote states it. meta: true if it is accurate.")
     answer_sentence: str = Field(
         ..., description="The sentence of the answer that contains the claim, copied verbatim."
     )
@@ -399,9 +389,7 @@ def quote_in_context(quote: str, context: str) -> bool:
         return False
     if quote in context:
         return True
-    match = SequenceMatcher(None, context, quote, autojunk=False).find_longest_match(
-        0, len(context), 0, len(quote)
-    )
+    match = SequenceMatcher(None, context, quote, autojunk=False).find_longest_match(0, len(context), 0, len(quote))
     return match.size >= 0.9 * len(quote)
 
 
@@ -450,9 +438,11 @@ def paragraph_of(answer: str, sentence: str) -> str:
 
     def overlap(paragraph: str) -> int:
         paragraph = normalize(paragraph)
-        return SequenceMatcher(None, paragraph, sentence, autojunk=False).find_longest_match(
-            0, len(paragraph), 0, len(sentence)
-        ).size
+        return (
+            SequenceMatcher(None, paragraph, sentence, autojunk=False)
+            .find_longest_match(0, len(paragraph), 0, len(sentence))
+            .size
+        )
 
     return max(paragraphs, key=overlap)
 
@@ -754,9 +744,7 @@ class Pipeline:
         if meter:
             meter.add_embedding(self.valves.EMBEDDING_MODEL, [query])
         dense = {}
-        for doc, score in self.vectorstore.similarity_search_with_score(
-            query, k=self.valves.FETCH_K
-        ):
+        for doc, score in self.vectorstore.similarity_search_with_score(query, k=self.valves.FETCH_K):
             if score < self.valves.MIN_SIMILARITY:
                 continue
             chunk_id = doc.metadata["chunk_id"]
@@ -769,8 +757,7 @@ class Pipeline:
         dense_n, keyword_n = minmax(dense), minmax(keyword)
         alpha = self.valves.ALPHA
         fused = {
-            chunk_id: alpha * dense_n.get(chunk_id, 0.0)
-            + (1 - alpha) * keyword_n.get(chunk_id, 0.0)
+            chunk_id: alpha * dense_n.get(chunk_id, 0.0) + (1 - alpha) * keyword_n.get(chunk_id, 0.0)
             for chunk_id in set(dense) | set(keyword)
         }
         ranked = sorted(fused.items(), key=lambda item: item[1], reverse=True)
@@ -809,9 +796,7 @@ class Pipeline:
     def _causal_paths(self, question: str, meter=None) -> List[List[str]]:
         # Directed cause -> effect paths through the concept graph, from the question's causes to its
         # effects (breadth-first, so shorter paths first). Without effects: the strongest onward chains.
-        asked = self.concept_extractor.invoke(
-            QUERY_CONCEPTS_PROMPT.format(question=question), config=run_config(meter)
-        )
+        asked = self.concept_extractor.invoke(QUERY_CONCEPTS_PROMPT.format(question=question), config=run_config(meter))
         starts = self._match_concepts(asked.causes, meter)
         ends = self._match_concepts(asked.effects, meter)
         if not starts:
@@ -855,8 +840,9 @@ class Pipeline:
                 for first, _ in self.out_edges.get(start, Counter()).most_common(2):
                     path = [start, first]
                     while len(path) <= max_hops:
-                        options = [t for t, _ in self.out_edges.get(path[-1], Counter()).most_common(5)
-                                   if t not in path]
+                        options = [
+                            t for t, _ in self.out_edges.get(path[-1], Counter()).most_common(5) if t not in path
+                        ]
                         if not options:
                             break
                         path.append(options[0])
@@ -887,17 +873,13 @@ class Pipeline:
             uncovered = {s for s in uncovered if best not in step_chunks[s]}
         return chosen
 
-    def _grade(
-        self, query: str, candidates: List[tuple], path_ids: frozenset = frozenset(), meter=None
-    ) -> List[tuple]:
+    def _grade(self, query: str, candidates: List[tuple], path_ids: frozenset = frozenset(), meter=None) -> List[tuple]:
         # reranking.py-style 0-10 LLM scoring combined with reliable_rag's
         # relevance grading: unsupported chunks are dropped before generation.
         docs = [self.docs[chunk_id] for chunk_id, _ in candidates]
         grades = self.grader.batch(
             [
-                GRADE_PROMPT.format(
-                    question=query, title=doc.metadata["title"], content=doc.page_content
-                )
+                GRADE_PROMPT.format(question=query, title=doc.metadata["title"], content=doc.page_content)
                 for doc in docs
             ],
             config=run_config(meter, max_concurrency=8),
@@ -920,7 +902,11 @@ class Pipeline:
         return kept[: self.valves.TOP_K] + steps[: self.valves.CHAIN_TOP_K]
 
     def _explore(
-        self, query: str, candidates: List[tuple], answered: bool = False, exclude: set = frozenset(),
+        self,
+        query: str,
+        candidates: List[tuple],
+        answered: bool = False,
+        exclude: set = frozenset(),
         meter=None,
     ) -> List[tuple]:
         # Explorer mode: the concepts of the closest chunks (and graph neighbours
@@ -934,9 +920,7 @@ class Pipeline:
             # Nothing passed MIN_SIMILARITY or BM25: take the nearest chunks anyway.
             if meter:
                 meter.add_embedding(self.valves.EMBEDDING_MODEL, [query])
-            for doc, _ in self.vectorstore.similarity_search_with_score(
-                query, k=self.valves.FETCH_K
-            ):
+            for doc, _ in self.vectorstore.similarity_search_with_score(query, k=self.valves.FETCH_K):
                 if doc.metadata["chunk_id"] not in pool:
                     pool.append(doc.metadata["chunk_id"])
 
@@ -996,9 +980,7 @@ class Pipeline:
         # against its excerpt with the same bar as normal retrieval.
         grades = self.grader.batch(
             [
-                GRADE_PROMPT.format(
-                    question=s.question, title=doc.metadata["title"], content=doc.page_content
-                )
+                GRADE_PROMPT.format(question=s.question, title=doc.metadata["title"], content=doc.page_content)
                 for s, doc in proposals
             ],
             config=run_config(meter, max_concurrency=8),
@@ -1037,12 +1019,8 @@ class Pipeline:
         if entry is None:
             return json.dumps({"follow_ups": []})
         if entry["suggestions"] is None:
-            entry["suggestions"] = self._explore(
-                query, entry["candidates"], answered=True, exclude=entry["exclude"]
-            )
-        return json.dumps(
-            {"follow_ups": [q for _, q in entry["suggestions"]]}, ensure_ascii=False
-        )
+            entry["suggestions"] = self._explore(query, entry["candidates"], answered=True, exclude=entry["exclude"])
+        return json.dumps({"follow_ups": [q for _, q in entry["suggestions"]]}, ensure_ascii=False)
 
     def _unsupported_claims(self, context: str, blocks: List[dict], answer: str, meter=None) -> tuple:
         # reliable_rag-style hallucination check, per claim: a claim only counts
@@ -1091,16 +1069,22 @@ class Pipeline:
             line, block = lines[item.line - 1], blocks[item.block - 1]
             new = added.get(item.line, set())
             cited = cited_numbers(line, len(blocks))
-            if (not cited or item.block in cited | new or block["opinion"]
-                    or len(new) >= self.valves.CORROBORATE_MAX_PER_LINE
-                    or not quote_in_context(item.quote, block["text"])):
+            if (
+                not cited
+                or item.block in cited | new
+                or block["opinion"]
+                or len(new) >= self.valves.CORROBORATE_MAX_PER_LINE
+                or not quote_in_context(item.quote, block["text"])
+            ):
                 continue
             added.setdefault(item.line, set()).add(item.block)
         for number, blocks_added in added.items():
             # The new citations go right after the line's last citation group.
             line = lines[number - 1]
             last = list(re.finditer(r"\[\d+(?:\s*,\s*\d+)*\]", line))[-1]
-            lines[number - 1] = line[: last.end()] + "".join(f"[{n}]" for n in sorted(blocks_added)) + line[last.end():]
+            lines[number - 1] = (
+                line[: last.end()] + "".join(f"[{n}]" for n in sorted(blocks_added)) + line[last.end() :]
+            )
         return "\n".join(lines), sum(len(n) for n in added.values())
 
     def _grounded_answer(self, question: str, context: str, blocks: List[dict], meter=None) -> Iterator[tuple]:
@@ -1120,8 +1104,7 @@ class Pipeline:
             yield (
                 "status",
                 f"{len(unsupported)} Aussage(n) nicht sauber belegt",
-                f"{len(unsupported)} Aussage(n) nicht sauber belegt:\n"
-                + "\n".join(f"  - {c}" for c in unsupported),
+                f"{len(unsupported)} Aussage(n) nicht sauber belegt:\n" + "\n".join(f"  - {c}" for c in unsupported),
             )
             if attempt == self.valves.MAX_REVISIONS:
                 break
@@ -1201,9 +1184,7 @@ class Pipeline:
             # Letzte Zeile der Frage: offenen Schritt abschließen, dann die Summe über alle Modelle.
             if not (meter and streaming):
                 return []
-            return cost_line() + [
-                status(f"Σ Frage gesamt: {meter.describe(meter.total, per_model=False)}", done=True)
-            ]
+            return cost_line() + [status(f"Σ Frage gesamt: {meter.describe(meter.total, per_model=False)}", done=True)]
 
         def step(short: str, detail: str = None, done: bool = False) -> list:
             # Sendet einen neuen Fortschrittsschritt; vorher die Kostenzeile des vorherigen Schritts.
@@ -1269,9 +1250,7 @@ class Pipeline:
         yield from step(f"{len(candidates)} Kandidaten gefunden")
         expanded = self._graph_expand(candidates)
         if len(expanded) > len(candidates):
-            yield from step(
-                f"Konzeptgraph: {len(expanded) - len(candidates)} verwandte Abschnitte ergänzt"
-            )
+            yield from step(f"Konzeptgraph: {len(expanded) - len(candidates)} verwandte Abschnitte ergänzt")
         candidates = expanded
         paths, path_ids = [], frozenset()
         if self.valves.CHAIN_SEARCH and self.concept_vectors is not None:
@@ -1339,19 +1318,20 @@ class Pipeline:
             refs = []
             for a, b in zip(path, path[1:]):
                 nums = [
-                    i for i, (doc, _, _) in enumerate(grounded, start=1)
+                    i
+                    for i, (doc, _, _) in enumerate(grounded, start=1)
                     if any(r["source"] == a and r["target"] == b for r in doc.metadata.get("relations", []))
                 ]
                 refs.append(nums)
             if all(refs):
-                line = path[0] + "".join(
-                    f" -> {b} [{', '.join(map(str, nums))}]" for b, nums in zip(path[1:], refs)
-                )
+                line = path[0] + "".join(f" -> {b} [{', '.join(map(str, nums))}]" for b, nums in zip(path[1:], refs))
                 path_lines.append(f"- {line}")
         if path_lines:
             context = (
                 "Causal paths (relations found across the sources; [n] = block that states the step):\n"
-                + "\n".join(path_lines) + "\n\n" + context
+                + "\n".join(path_lines)
+                + "\n\n"
+                + context
             )
 
         # None = follow-ups are computed later by the follow-up task (_follow_ups).
@@ -1418,8 +1398,7 @@ class Pipeline:
                 kind = "Konzept"
             videos = "; ".join(sorted({cite_source(s) for s in meta["sources"]}))
             source_lines.append(
-                f"- [{i}] {meta['title']} ({kind}) - {videos}\n"
-                f"  Relevanz {grade.relevance}/10: {grade.reason}"
+                f"- [{i}] {meta['title']} ({kind}) - {videos}\n  Relevanz {grade.relevance}/10: {grade.reason}"
             )
         if source_lines:
             yield "\n\nQuellen:\n" + "\n".join(source_lines)
