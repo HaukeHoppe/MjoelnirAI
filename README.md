@@ -47,6 +47,7 @@ Kurs einer Anleihe (bond price). Click the image to open it.</sub>
 - [Setup](#setup)
 - [Configuration](#configuration)
 - [Debugging](#debugging)
+- [Tests and CI](#tests-and-ci)
 - [Repository layout](#repository-layout)
 - [Known limitations](#known-limitations)
 
@@ -438,6 +439,31 @@ When an answer is missing, find which stage is responsible:
 
 ---
 
+## Tests and CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`, `develop`, `feature/*`, `fix/*`,
+`docs/*` and on pull requests. No job calls OpenAI or needs a secret.
+
+| Job | Checks |
+|-----|--------|
+| Python | `ruff check` (rules in [`pyproject.toml`](pyproject.toml): F, E9, B), `pytest` (unit tests without OpenAI calls) |
+| Graph explorer | `tsc` type check, vitest, Vite build |
+| Compose and Caddyfile | `docker compose config` (local and `vps` profile), Caddy built with its plugins validates the Caddyfile |
+| Secret scan | gitleaks on the pushed commits |
+
+The same checks locally:
+
+```sh
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scriptsctivate
+pip install -r requirements-dev.txt
+ruff check . && pytest
+```
+
+The LLM evals ([`data/eval_chains.py`](data/eval_chains.py)) are not part of CI: they cost money and are not
+deterministic. Run them before a release.
+
+---
+
 ## Repository layout
 
 | Path | Contents |
@@ -453,6 +479,7 @@ When an answer is missing, find which stage is responsible:
 | `all_rag_techniques_runnable_scripts/` | Reference RAG techniques the pipeline is adapted from (HyPE, fusion, RAPTOR, reranking, graph RAG, …); third-party code, kept locally, not in the repository |
 | [`docs/`](docs/) | Detailed documentation |
 | [`docker-compose.yaml`](docker-compose.yaml), `Dockerfile.*`, [`requirements.txt`](requirements.txt) | Container setup |
+| [`pyproject.toml`](pyproject.toml), [`requirements-dev.txt`](requirements-dev.txt), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Lint and test settings, dev dependencies, CI |
 
 ---
 
