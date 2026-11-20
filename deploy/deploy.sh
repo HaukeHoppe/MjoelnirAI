@@ -28,7 +28,9 @@ fail() {
 
 changed() {
 	# Prüft, ob sich zwischen zwei Commits eine Datei geändert hat, deren Pfad auf das Regex-Muster passt.
-	git diff --name-only "$1" "$2" | grep -qE "$3"
+	# Not "git diff | grep -q": with pipefail, grep stopping at the first match ends git with SIGPIPE and the
+	# pipeline counts as failed, so a long diff would report "unchanged".
+	grep -qE "$3" < <(git diff --name-only "$1" "$2")
 }
 
 wait_for() {
@@ -42,7 +44,7 @@ wait_for() {
 	log "healthy: $name ($((SECONDS - start))s)"
 }
 
-# shellcheck disable=SC2317  # called indirectly through wait_for
+# shellcheck disable=SC2317,SC2329  # called indirectly through wait_for
 pipeline_loaded() {
 	# Fragt den Pipelines-Server nach seinen Modellen; gesund nur, wenn die Capital-Pipeline geladen ist.
 	# Der API-Key wird im Container aus dessen Umgebung gelesen und erscheint nirgends im Log.
