@@ -454,7 +454,7 @@ When an answer is missing, find which stage is responsible:
 The same checks locally:
 
 ```sh
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scriptsctivate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 ruff check . && ruff format --check . && pytest
 # Fix what ruff can fix itself: ruff check --fix . && ruff format .
