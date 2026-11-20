@@ -8,5 +8,3 @@ aiohttp>=3.10
 rank-bm25
 numpy
 faiss-cpu
-# Tracing (optional, active only with the LANGFUSE_* keys); the pipeline uses the v5 SDK API.
-langfuse>=5,<6

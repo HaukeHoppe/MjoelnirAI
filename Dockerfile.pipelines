@@ -4,3 +4,7 @@ FROM ghcr.io/open-webui/pipelines:main@sha256:b48e9bc338ce2be0acfbeff01810db7240
 COPY requirements.txt /tmp/requirements.txt
 
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Tracing only here, not in requirements.txt: that file also goes into the Open WebUI image, where langfuse
+# would replace the OpenTelemetry packages Open WebUI pins and it no longer starts. Active only with LANGFUSE_* keys.
+RUN pip install --no-cache-dir "langfuse>=5,<6"
