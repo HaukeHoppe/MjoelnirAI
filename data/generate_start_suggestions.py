@@ -19,13 +19,12 @@ import json
 import os
 import sys
 from itertools import zip_longest
-from typing import List
 
-from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, "/app/pipelines")
-from capital_rag_pipeline import GRADE_PROMPT, Grade, Pipeline, tokenize  # noqa: E402
+from capital_rag_pipeline import GRADE_PROMPT, Grade, Pipeline, tokenize
 
 
 class Starter(BaseModel):
@@ -47,7 +46,7 @@ Topic: {title}
 {content}"""
 
 
-def pick_topics(summaries: List[dict], count: int) -> List[dict]:
+def pick_topics(summaries: list[dict], count: int) -> list[dict]:
     # Best-covered topics first, alternating between market domains so the
     # start page is not all one area.
     by_domain = {}
@@ -71,7 +70,7 @@ Topic: {title}
 {content}"""
 
 
-def chain_topics(index_dir: str, count: int) -> List[dict]:
+def chain_topics(index_dir: str, count: int) -> list[dict]:
     # Cause -> effect chain texts (build_public_kb.py), alternating between market domains.
     with open(os.path.join(index_dir, "extracted_v2_all.json"), encoding="utf-8") as f:
         chunks = [c for c in json.load(f) if c["sources"][0].startswith("Mjoelnir-Wirkungskette")]

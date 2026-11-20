@@ -16,7 +16,8 @@ The file is published as is. Only export the public index (Wikipedia and own tex
 
 Run on the host or in the pipelines-capital container (no API calls, a few seconds):
     python data/export_explorer_graph.py
-    docker exec open-webui-pipelines-capital python /data/export_explorer_graph.py --index_dir /data/faiss_public_index --out /data/explorer/graph.json
+    docker exec open-webui-pipelines-capital python /data/export_explorer_graph.py \
+        --index_dir /data/faiss_public_index --out /data/explorer/graph.json
 """
 
 import argparse
@@ -25,7 +26,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -70,7 +71,7 @@ def german_score(form: str) -> int:
     # Umlauts and German function words are a clear sign; English titles capitalize every word,
     # German ones only the nouns ("Rechte der Aktionäre" vs. "First Shares To Outsiders").
     words = form.split()
-    score = 2 if re.search(r"[äöüß]", form, re.I) else 0
+    score = 2 if re.search(r"[äöüß]", form, re.IGNORECASE) else 0
     score += (
         2
         if any(w in {"der", "die", "das", "des", "den", "dem", "und", "von", "im", "am", "zur", "zum"} for w in words)
@@ -132,7 +133,7 @@ def main():
         )
 
     out = {
-        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "concepts": [{"id": n["id"], "label": labels[n["id"]], "chunks": len(n["chunk_ids"])} for n in nodes],
         "edges": edges,
         "chunks": {str(i): source_of(chunks[i], urls) for i in sorted(used_chunks) if i in chunks},

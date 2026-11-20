@@ -42,11 +42,11 @@ import re
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
-from sklearn.cluster import AgglomerativeClustering
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores.utils import DistanceStrategy
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from pydantic import BaseModel, Field
+from sklearn.cluster import AgglomerativeClustering
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_INDEX_DIR = os.path.join(THIS_DIR, "faiss_capital_index")
@@ -90,7 +90,7 @@ If the chunk contains ANY current market assessment, forecast or recommendation,
 Title: {title}
 
 Chunk:
-{content}"""
+{content}"""  # noqa: E501 - prompt text, sent verbatim
 
 
 def content_hash(chunk: dict) -> str:
@@ -156,7 +156,7 @@ Judge by the mechanism text. The time_horizon field only says how fast the effec
 
 Relation: {source} -> {target} ({direction}, {time_horizon})
 Mechanism: {mechanism}
-Conditions: {conditions}"""
+Conditions: {conditions}"""  # noqa: E501 - prompt text, sent verbatim
 
 
 def relation_hash(chunk_id, rel: dict) -> str:
@@ -238,7 +238,7 @@ def build_summaries(chunks: list, classes: dict, primary_vectors: dict, llm: Cha
 
     clusters = []
     for label in sorted(set(labels)):
-        members = [c for c, l in zip(concept_chunks, labels) if l == label]
+        members = [c for c, lab in zip(concept_chunks, labels) if lab == label]
         videos = {video_of(s) for c in members for s in c["sources"]}
         # Only repeated explanations across videos become a canonical node.
         if len(members) >= 2 and len(videos) >= 2:

@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from capital_rag_pipeline import DEFAULT_PRICES, UsageMeter, run_config  # noqa: E402
+from capital_rag_pipeline import DEFAULT_PRICES, UsageMeter, run_config
 
 
 def result(model: str, inp: int, out: int, cached: int = 0, in_llm_output: bool = True) -> LLMResult:

@@ -12,8 +12,8 @@ import os
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import FancyBboxPatch  # noqa: E402
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch
 
 OUT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "architecture_diagram.png"))
 
@@ -91,16 +91,16 @@ def arrow(start, end, label=None, rad=0.0, pos=0.5, dx=0, dy=0, color=INK, style
         "",
         xy=end,
         xytext=start,
-        arrowprops=dict(
-            arrowstyle="<|-|>" if both else "-|>",
-            color=color,
-            lw=1.8,
-            mutation_scale=15,
-            linestyle=style,
-            connectionstyle=f"arc3,rad={rad}",
-            shrinkA=2,
-            shrinkB=2,
-        ),
+        arrowprops={
+            "arrowstyle": "<|-|>" if both else "-|>",
+            "color": color,
+            "lw": 1.8,
+            "mutation_scale": 15,
+            "linestyle": style,
+            "connectionstyle": f"arc3,rad={rad}",
+            "shrinkA": 2,
+            "shrinkB": 2,
+        },
     )
     if label:
         ax.text(
@@ -112,7 +112,7 @@ def arrow(start, end, label=None, rad=0.0, pos=0.5, dx=0, dy=0, color=INK, style
             ha="center",
             va="center",
             linespacing=1.25,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="none"),
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "none"},
         )
 
 
