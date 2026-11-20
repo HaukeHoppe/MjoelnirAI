@@ -118,7 +118,7 @@ def main():
 
     min_relevance = Pipeline.Valves().MIN_RELEVANCE
     suggestions, seen = [], set()
-    for (s, st), grade in zip(pairs, grades):
+    for (_s, st), grade in zip(pairs, grades):
         if isinstance(grade, Exception) or not grade.supports_answer or grade.relevance < min_relevance:
             print(f"skip: {st.question} ({'error' if isinstance(grade, Exception) else grade.reason})")
             continue

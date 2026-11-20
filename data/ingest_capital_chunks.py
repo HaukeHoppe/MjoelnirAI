@@ -39,7 +39,7 @@ import hashlib
 import json
 import os
 import re
-from typing import List, Literal
+from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, Field
