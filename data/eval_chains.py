@@ -58,7 +58,8 @@ VALIDATION = [
     "Wie können steigende Lebensmittel- und Energiepreise über die Inflationserwartungen die Geldpolitik beeinflussen?",
     "Warum können stark fallende Anleihekurse Versicherungen und Pensionsfonds unter Druck setzen?",
     "Wie kann eine Bitcoin-Rally über gehebelte Positionen in einen plötzlichen Absturz umschlagen?",
-    "Wie wirkt sich eine starke Aufwertung des Schweizer Franken auf Schweizer Exporteure und die Schweizer Notenbank aus?",
+    "Wie wirkt sich eine starke Aufwertung des Schweizer Franken auf Schweizer Exporteure "
+    "und die Schweizer Notenbank aus?",
     "Wie beeinflussen steigende Hypothekenzinsen die Bautätigkeit, Baustoffhersteller und Banken?",
     "Warum kann ein Handelskonflikt zwischen den USA und China auch europäische Exportwerte und den Euro treffen?",
 ]
@@ -93,11 +94,13 @@ class Judgement(BaseModel):
 
 
 def ask(question: str) -> str:
-    body = json.dumps({
-        "model": "capital_rag_pipeline",
-        "messages": [{"role": "user", "content": question}],
-        "stream": False,
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "model": "capital_rag_pipeline",
+            "messages": [{"role": "user", "content": question}],
+            "stream": False,
+        }
+    ).encode("utf-8")
     request = urllib.request.Request(
         "http://localhost:9099/v1/chat/completions",
         data=body,
@@ -110,7 +113,7 @@ def ask(question: str) -> str:
 def cited_sources(answer: str) -> int:
     # Entries of the "Quellen:" list the pipeline appends: only the sources the answer cites.
     parts = answer.split("\n\nQuellen:", 1)
-    return len(re.findall(r"^- \[\d+\]", parts[1], re.M)) if len(parts) > 1 else 0
+    return len(re.findall(r"^- \[\d+\]", parts[1], re.MULTILINE)) if len(parts) > 1 else 0
 
 
 def main():
@@ -128,25 +131,40 @@ def main():
         start = time.time()
         try:
             answer = ask(question)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - a failed question is scored as an error, the run goes on
             answer = f"ERROR: {e}"
         seconds = round(time.time() - start)
         text = answer.split("\n\nQuellen:")[0]
         verdict = judge.invoke(JUDGE_PROMPT.format(question=question, answer=text))
         control = question in CONTROLS
         sources = cited_sources(answer)
-        results.append({"question": question, "control": control, "seconds": seconds, **verdict.model_dump(),
-                        "sources": sources, "answer": answer})
-        print(f"{'CONTROL ' if control else ''}steps {verdict.steps} complete {verdict.complete} depth {verdict.depth} "
-              f"refused {verdict.refused} sources {sources} {seconds:4d}s  {question[:60]}", flush=True)
-        json.dump(results, open(args.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        results.append(
+            {
+                "question": question,
+                "control": control,
+                "seconds": seconds,
+                **verdict.model_dump(),
+                "sources": sources,
+                "answer": answer,
+            }
+        )
+        print(
+            f"{'CONTROL ' if control else ''}steps {verdict.steps} complete {verdict.complete} depth {verdict.depth} "
+            f"refused {verdict.refused} sources {sources} {seconds:4d}s  {question[:60]}",
+            flush=True,
+        )
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=1)
 
     chains = [r for r in results if not r["control"]]
     n = len(chains)
-    print(f"\nmean steps {sum(r['steps'] for r in chains) / n:.1f} | complete chains "
-          f"{sum(r['complete'] == 2 for r in chains)}/{n} | mean depth {sum(r['depth'] for r in chains) / n:.1f} "
-          f"| refused {sum(r['refused'] for r in chains)}/{n} | mean sources "
-          f"{sum(r['sources'] for r in chains) / n:.1f} (one source: {sum(r['sources'] == 1 for r in chains)}/{n}) | mean time {sum(r['seconds'] for r in chains) / n:.0f}s")
+    print(
+        f"\nmean steps {sum(r['steps'] for r in chains) / n:.1f} | complete chains "
+        f"{sum(r['complete'] == 2 for r in chains)}/{n} | mean depth {sum(r['depth'] for r in chains) / n:.1f} "
+        f"| refused {sum(r['refused'] for r in chains)}/{n} | mean sources "
+        f"{sum(r['sources'] for r in chains) / n:.1f} (one source: {sum(r['sources'] == 1 for r in chains)}/{n}) "
+        f"| mean time {sum(r['seconds'] for r in chains) / n:.0f}s"
+    )
     controls = [r for r in results if r["control"]]
     if controls:
         print(f"controls correctly not answered: {sum(r['refused'] for r in controls)}/{len(controls)}")

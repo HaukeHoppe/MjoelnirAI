@@ -22,8 +22,8 @@ import json
 import sys
 
 sys.path.insert(0, "/app/backend")
-from open_webui.models.models import ModelForm, Models  # noqa: E402
-from open_webui.models.users import Users  # noqa: E402
+from open_webui.models.models import ModelForm, Models
+from open_webui.models.users import Users
 
 
 async def main():
@@ -39,7 +39,7 @@ async def main():
 
     suggestions = None
     if not args.keep_suggestions:
-        with open(args.file, encoding="utf-8") as f:
+        with open(args.file, encoding="utf-8") as f:  # noqa: ASYNC230 - one read at startup, nothing concurrent
             suggestions = json.load(f)
 
     existing = await Models.get_model_by_id(args.model_id)

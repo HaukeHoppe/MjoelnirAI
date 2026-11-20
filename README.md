@@ -446,7 +446,7 @@ When an answer is missing, find which stage is responsible:
 
 | Job | Checks |
 |-----|--------|
-| Python | `ruff check` (rules in [`pyproject.toml`](pyproject.toml): F, E9, B), `pytest` (unit tests without OpenAI calls) |
+| Python | `ruff check` and `ruff format --check` (rules and line length in [`pyproject.toml`](pyproject.toml)), `pytest` (unit tests without OpenAI calls) |
 | Graph explorer | `tsc` type check, vitest, Vite build |
 | Compose and Caddyfile | `docker compose config` (local and `vps` profile), Caddy built with its plugins validates the Caddyfile |
 | Secret scan | gitleaks on the pushed commits |
@@ -454,9 +454,10 @@ When an answer is missing, find which stage is responsible:
 The same checks locally:
 
 ```sh
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scriptsctivate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-ruff check . && pytest
+ruff check . && ruff format --check . && pytest
+# Fix what ruff can fix itself: ruff check --fix . && ruff format .
 ```
 
 The LLM evals ([`data/eval_chains.py`](data/eval_chains.py)) are not part of CI: they cost money and are not

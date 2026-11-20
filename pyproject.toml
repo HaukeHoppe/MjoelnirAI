@@ -6,12 +6,21 @@
 target-version = "py311"
 line-length = 120
 
+[tool.ruff.format]
+# Python files only: code blocks in the Markdown docs keep their hand-aligned comments.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
-# Bug-class rules only: F (pyflakes: undefined names, unused imports/variables), E9 (syntax errors)
-# and B (bugbear). Style rules stay off so existing code is not pushed into reformatting.
-select = ["F", "E9", "B"]
+# F pyflakes, E/W pycodestyle, I import order, B bugbear, UP pyupgrade (Python 3.11 syntax),
+# SIM simplify, C4 comprehensions, RUF ruff, BLE blind except, ASYNC blocking calls in async code,
+# PIE, PERF, RET, FURB, LOG/G logging. Pylint (PL) stays off: magic numbers and argument/branch
+# counts would force refactors without catching bugs.
+select = ["F", "E", "W", "I", "B", "UP", "SIM", "C4", "RUF", "BLE", "ASYNC", "PIE", "PERF", "RET", "FURB", "LOG", "G"]
 # zip() without strict=: the code zips unequal lengths on purpose, e.g. zip(path, path[1:]).
-ignore = ["B905"]
+# SIM905: word lists written as """...""".split() stay compact instead of one word per line.
+ignore = ["B905", "SIM905"]
+# German texts and prompts use typographic characters on purpose (dashes, quotes, multiplication sign).
+allowed-confusables = ["–", "‘", "’", "‚", "›", "´", "×"]
 
 [tool.pytest.ini_options]
 testpaths = ["pipelines-capital/tests"]

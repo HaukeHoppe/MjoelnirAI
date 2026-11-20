@@ -35,6 +35,9 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: Ruff
         run: ruff check --output-format github .
+      # Formatierung wie lokal mit "ruff format ."; --diff zeigt im Log, was abweicht.
+      - name: Ruff format
+        run: ruff format --check --diff .
       # Exit code 5 = no tests collected (branches without pipelines-capital/tests); anything else fails.
       - name: Pytest
         run: |
