@@ -558,6 +558,7 @@ Editable in *Admin Panel → Settings → Pipelines* (select the capital connect
 | `EXPLORE_MODE` | `True` | Related-topic suggestions and follow-up chips |
 | `EXPLORE_SUGGESTIONS` | 4 | Max suggestions |
 | `EXPLORE_MIN_CHUNKS` | 2 | Min chunks per suggested concept |
+| `LANGFUSE_ENABLED` | `True` | Langfuse tracing; active only when `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are set (see README, *Tracing with Langfuse*) |
 
 Ingestion flags: `--index_dir`, `--chunks`, `--embedding_model`, `--llm_model`, `--cluster_similarity` (0.73).
 

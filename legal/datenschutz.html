@@ -110,8 +110,10 @@
 		<h3>Wofür nutzen wir Ihre Daten?</h3>
 		<p>
 			Die Daten werden erhoben, um die Website und den KI-Chat bereitzustellen und einen sicheren, fehlerfreien
-			Betrieb zu gewährleisten. Eine Analyse Ihres Nutzerverhaltens, Tracking oder Werbung findet nicht statt.
-			Es werden keine Inhalte oder Skripte von Drittanbietern in Ihren Browser geladen.
+			Betrieb zu gewährleisten. Ihre Chat-Eingaben und die erzeugten Antworten werden außerdem zur Fehleranalyse
+			und Qualitätssicherung für begrenzte Zeit bei unserem Dienstleister Langfuse gespeichert (siehe Abschnitt 5).
+			Eine Analyse Ihres Nutzerverhaltens, Tracking oder Werbung findet nicht statt. Es werden keine Inhalte oder
+			Skripte von Drittanbietern in Ihren Browser geladen.
 		</p>
 
 		<h3>Welche Rechte haben Sie bezüglich Ihrer Daten?</h3>
@@ -314,7 +316,7 @@
 			bestehen.
 		</p>
 
-		<h2>5. KI-Chat und Nutzung der OpenAI API</h2>
+		<h2>5. KI-Chat, Nutzung der OpenAI API und Qualitätssicherung mit Langfuse</h2>
 
 		<h3>Funktionsweise und Speicherung der Chats</h3>
 		<p>
@@ -324,7 +326,8 @@
 		</p>
 		<p>
 			Chats werden ausschließlich als temporäre Chats geführt und nicht in unserer Datenbank gespeichert. Ihre
-			Eingaben werden auf unserem Server nur für die Dauer der Beantwortung verarbeitet. Vom KI-Modell erzeugte
+			Eingaben werden auf unserem Server nur für die Dauer der Beantwortung verarbeitet; zur Qualitätssicherung
+			wird der Ablauf jeder Anfrage bei Langfuse protokolliert (siehe unten). Vom KI-Modell erzeugte
 			Texte, die aus Ihren Eingaben abgeleitet sind (z. B. Vorschläge für Folgefragen oder intern verworfene
 			Aussagen der Antwortprüfung), können in den technischen Logs unseres Servers erscheinen; diese werden nach
 			spätestens 14 Tagen gelöscht.
@@ -359,14 +362,44 @@
 			Gesundheits-, Finanz- oder sonstigen sensiblen Daten.
 		</p>
 
-		<h3>Auftragsverarbeitung</h3>
+		<h3>Qualitätssicherung mit Langfuse</h3>
 		<p>
-			Wir haben mit OpenAI einen Vertrag über Auftragsverarbeitung (Data Processing Addendum) geschlossen. Er
-			gewährleistet, dass OpenAI die übermittelten Daten nur nach unseren Weisungen und unter Einhaltung der DSGVO
-			verarbeitet.
+			Um Fehler zu finden und die Qualität der Antworten zu verbessern, protokollieren wir den Ablauf jeder Anfrage
+			an den KI-Chat mit dem Dienst Langfuse. Dabei werden Ihre Eingabe, die Ihnen angezeigte Antwort sowie die
+			einzelnen Verarbeitungsschritte (an das KI-Modell gesendete Texte und dessen Antworten, Bewertungen der
+			Textauszüge, Zeitpunkte, Verarbeitungsdauer, Tokenverbrauch und Kosten) gespeichert. Als Nutzerkennung wird
+			nur die interne, pseudonyme Kennung des gemeinsamen Gast-Zugangs übermittelt. Ihre IP-Adresse wird nicht an
+			Langfuse übermittelt; unser Server sendet die Daten, Ihr Browser stellt keine Verbindung zu Langfuse her.
+		</p>
+		<p>
+			Anbieter ist die ClickHouse, Inc., 4113 Alpine Road, Portola Valley, CA 94028, USA, die Langfuse gemeinsam
+			mit der Langfuse GmbH (Deutschland) betreibt. Die Daten werden in der EU-Region von Langfuse auf Servern von
+			Amazon Web Services in Irland gespeichert. Ein Zugriff durch die ClickHouse, Inc. und verbundene Unternehmen
+			außerhalb der EU, insbesondere in den USA (z. B. im Rahmen von Wartung und Support), ist nicht
+			ausgeschlossen. Die Datenübertragung in die USA wird auf die Standardvertragsklauseln der EU-Kommission
+			(Art. 46 Abs. 2 lit. c DSGVO) gestützt. Details finden Sie hier:
+			<a href="https://langfuse.com/security/gdpr" rel="noopener">https://langfuse.com/security/gdpr</a>
+			und
+			<a href="https://langfuse.com/security/subprocessors" rel="noopener">https://langfuse.com/security/subprocessors</a>.
+		</p>
+		<p>
+			Wir löschen die protokollierten Daten, sobald sie für die Fehleranalyse und Qualitätssicherung nicht mehr
+			erforderlich sind, spätestens nach 30 Tagen. Die Verarbeitung erfolgt auf Grundlage von Art. 6 Abs. 1 lit. f
+			DSGVO. Unser berechtigtes Interesse liegt in der Fehlerfreiheit, Zuverlässigkeit und Wirtschaftlichkeit des
+			KI-Chats, insbesondere darin, fehlerhafte oder unbelegte Antworten zu erkennen und zu beheben. Sie können
+			der Verarbeitung aus Gründen, die sich aus Ihrer besonderen Situation ergeben, jederzeit widersprechen
+			(Art. 21 DSGVO).
 		</p>
 
-		<p class="muted">Stand: Oktober 2026</p>
+		<h3>Auftragsverarbeitung</h3>
+		<p>
+			Wir haben mit OpenAI und mit der ClickHouse, Inc. (Langfuse) jeweils einen Vertrag über Auftragsverarbeitung
+			(AVV) geschlossen. Hierbei handelt es sich um datenschutzrechtlich vorgeschriebene Verträge, die
+			gewährleisten, dass die Anbieter die personenbezogenen Daten unserer Websitebesucher nur nach unseren
+			Weisungen und unter Einhaltung der DSGVO verarbeiten.
+		</p>
+
+		<p class="muted">Stand: November 2026</p>
 		<p class="muted">Quelle: <a href="https://www.e-recht24.de" rel="noopener">eRecht24</a>, individuell angepasst.</p>
 
 		<a class="back" href="/">← Zurück zum Chat</a> · <a class="back" href="/impressum">Impressum</a>

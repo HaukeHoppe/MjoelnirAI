@@ -5,7 +5,7 @@ date: 2026-09-25
 version: 0.4
 license: MIT
 description: RAG over the capital-markets chunks in faiss_public_index (Wikipedia articles and own explanatory texts, built by build_public_kb.py and ingest_capital_chunks.py; INDEX_DIR can point to another index such as faiss_capital_index). Query flow - fusion retrieval (HyPE dense vectors + BM25, adapted from fusion_retrieval.py), concept-graph expansion (graph.json), causal chain search (cause -> effect paths of up to 4 steps through the directed concept graph, with the chunks stating each step), LLM reranking + relevance/grounding grading per chunk (reranking.py / reliable_rag), generation that keeps time-bound opinions attributed to their source, a post-answer grounding check, and a source list that explains why each source was used (explainable_retrieval.py). Explorer mode: without a grounded answer, related covered topics are suggested as verified follow-up questions. Runs in its own pipelines container (pipelines-capital) next to the climate test pipeline.
-requirements: langchain-community,langchain-openai,langchain-core,faiss-cpu,openai,pydantic,rank-bm25,numpy
+requirements: langchain-community,langchain-openai,langchain-core,faiss-cpu,openai,pydantic,rank-bm25,numpy,langfuse
 """  # noqa: E501 - Open WebUI reads each front matter field from a single line
 
 import json
@@ -27,6 +27,12 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 
+try:
+    from langfuse import Langfuse, propagate_attributes
+    from langfuse.langchain import CallbackHandler as LangfuseHandler
+except ImportError:  # optional: without the package the pipeline runs untraced
+    Langfuse = None
+
 # USD per 1M tokens: [input, cached input, output]. Check openai.com/api/pricing when models change.
 DEFAULT_PRICES = {
     "gpt-4.1": [2.00, 0.50, 8.00],
@@ -46,6 +52,8 @@ class UsageMeter(BaseCallbackHandler):
         self.prices = prices
         self.lock = threading.Lock()
         self.pending, self.total = {}, {}
+        # Alle Callbacks dieser Frage für run_config: der Zähler selbst, bei aktivem Langfuse auch dessen Handler.
+        self.callbacks = [self]
 
     def on_llm_end(self, response, **kwargs):
         # Wird von LangChain nach jedem Chat-Aufruf aufgerufen (invoke, batch, stream, structured output)
@@ -120,9 +128,9 @@ class UsageMeter(BaseCallbackHandler):
 
 
 def run_config(meter, **extra) -> dict:
-    # LangChain-Config für einen Aufruf: hängt den Zähler als Callback an, falls es einen gibt.
+    # LangChain-Config für einen Aufruf: hängt die Callbacks der Frage an (Zähler, ggf. Langfuse).
     # Ohne Zähler (z. B. generate_start_suggestions.py) bleibt alles wie bisher.
-    return {**extra, **({"callbacks": [meter]} if meter else {})}
+    return {**extra, **({"callbacks": list(meter.callbacks)} if meter else {})}
 
 
 class Grade(BaseModel):
@@ -614,6 +622,9 @@ class Pipeline:
         SHOW_COSTS: bool = True
         # USD per 1M tokens as JSON: {"model prefix": [input, cached input, output]}.
         MODEL_PRICES: str = json.dumps(DEFAULT_PRICES)
+        # Langfuse tracing: one trace per question with every LLM step. Active only when LANGFUSE_PUBLIC_KEY and
+        # LANGFUSE_SECRET_KEY are set in the container (.env); this switch turns it off without a deployment.
+        LANGFUSE_ENABLED: bool = True
 
     def __init__(self):
         self.name = "Capital Markets RAG"
@@ -640,6 +651,7 @@ class Pipeline:
         self.grader = None
         self.checker = None
         self.corroborator = None
+        self.langfuse = None
 
     def _load(self):
         # Loads the index built by ingest_capital_chunks.py. Does NOT run ingestion.
@@ -674,6 +686,66 @@ class Pipeline:
         # Revisions use the stronger model too: gpt-4o-mini tended to keep the
         # flagged statement in slightly different words.
         self.reviser = check_llm
+        self._init_langfuse()
+
+    def _init_langfuse(self):
+        # Verbindet sich mit Langfuse, wenn Paket, beide Keys und LANGFUSE_ENABLED da sind; sonst kein Tracing.
+        # Base-URL (EU-Cloud) und Umgebung liest der Client aus LANGFUSE_BASE_URL / LANGFUSE_TRACING_ENVIRONMENT.
+        keys = os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")
+        if not (Langfuse and keys and self.valves.LANGFUSE_ENABLED):
+            self.langfuse = None
+            return
+        try:
+            self.langfuse = Langfuse()
+            print("[capital_rag] Langfuse tracing enabled")
+        except Exception as e:  # noqa: BLE001 - tracing is optional, the pipeline runs without it
+            print(f"[capital_rag] Langfuse disabled: {e}")
+            self.langfuse = None
+
+    def _start_trace(self, question: str, body: dict):
+        # Legt den Wurzel-Span einer Frage an und einen LangChain-Handler, der alle Aufrufe darunter hängt.
+        # Explizite trace_context statt OpenTelemetry-Kontext: pipe() ist ein Generator und grader.batch()
+        # läuft in Threads, ein "aktueller" Span ginge zwischen den Schritten verloren.
+        # Nutzer: nur die interne Open-WebUI-ID und die Rolle, nie Name oder E-Mail.
+        if self.langfuse is None:
+            return None
+        user = body.get("user") or {}
+        try:
+            with propagate_attributes(
+                user_id=user.get("id"),
+                tags=[f"role:{user['role']}"] if user.get("role") else None,
+                trace_name="capital-rag",
+            ):
+                root = self.langfuse.start_observation(
+                    name="capital-rag",
+                    input=question,
+                    metadata={
+                        "llm_model": self.valves.LLM_MODEL,
+                        "grader_model": self.valves.GRADER_MODEL,
+                        "check_model": self.valves.CHECK_MODEL,
+                        "index_dir": self.valves.INDEX_DIR,
+                    },
+                )
+            return root, LangfuseHandler(trace_context={"trace_id": root.trace_id, "parent_span_id": root.id})
+        except Exception as e:  # noqa: BLE001 - tracing must never block an answer
+            print(f"[capital_rag] Langfuse trace failed: {e}")
+            return None
+
+    def _end_trace(self, trace, output: str, error: BaseException | None = None):
+        # Schließt den Trace: gezeigte Antwort als Output und Score "answered" (0 = keine belegte Antwort),
+        # damit sich in Langfuse die unbeantworteten Fragen filtern lassen. Abbruch oder Fehler: kein Score.
+        root, _ = trace
+        try:
+            if isinstance(error, GeneratorExit):
+                root.update(output=output, level="WARNING", status_message="chat closed before the answer was complete")
+            elif error is not None:
+                root.update(output=output, level="ERROR", status_message=str(error))
+            else:
+                root.update(output=output)
+                root.score_trace(name="answered", value=0 if NO_ANSWER in output else 1, data_type="BOOLEAN")
+            root.end()
+        except Exception as e:  # noqa: BLE001 - tracing must never break an answer
+            print(f"[capital_rag] Langfuse trace not closed: {e}")
 
     def _build_keyword_index(self):
         # One BM25 document per chunk: title + concepts + content + every text it
@@ -743,7 +815,9 @@ class Pipeline:
         self._load()
 
     async def on_shutdown(self):
-        pass
+        # Noch gepufferte Traces vor dem Beenden an Langfuse senden.
+        if self.langfuse is not None:
+            self.langfuse.flush()
 
     async def on_valves_updated(self):
         self._load()
@@ -1148,6 +1222,26 @@ class Pipeline:
         yield ("answer", None, False)
 
     def pipe(self, user_message: str, model_id: str, messages: list[dict], body: dict) -> str | Generator | Iterator:
+        # Einstieg für Open WebUI. Mit Langfuse wird jede Frage ein Trace (Frage, gezeigte Antwort, alle
+        # LLM-Schritte darunter); Hintergrundaufgaben wie Titel und Tags werden nicht getraced.
+        trace = None if user_message.startswith("### Task:") else self._start_trace(user_message, body)
+        if trace is None:
+            yield from self._pipe(user_message, model_id, messages, body)
+            return
+        shown, error = [], None
+        try:
+            for chunk in self._pipe(user_message, model_id, messages, body, trace[1]):
+                if isinstance(chunk, str):
+                    shown.append(chunk)
+                yield chunk
+        except BaseException as e:  # incl. GeneratorExit when the chat is closed mid-answer
+            error = e
+            raise
+        finally:
+            self._end_trace(trace, "".join(shown), error)
+
+    def _pipe(self, user_message: str, model_id: str, messages: list[dict], body: dict, trace_handler=None) -> Iterator:
+        # Beantwortet eine Frage (oder eine Hintergrundaufgabe) und liefert Status-Events und Antworttext.
         if user_message.startswith("### Task:"):
             # Open WebUI background task, not a question: follow-ups come from the
             # explorer, everything else (title, tags) from the plain LLM.
@@ -1177,7 +1271,12 @@ class Pipeline:
         streaming = body.get("stream", True)
         log_open = False
         # Cost display: tokens and cost of each step, then the question's total (SHOW_COSTS).
-        meter = UsageMeter(json.loads(self.valves.MODEL_PRICES)) if self.valves.SHOW_COSTS else None
+        # The meter also carries the Langfuse handler to every LLM call (run_config), so it exists when
+        # tracing is on even with the cost display off.
+        show_costs = self.valves.SHOW_COSTS
+        meter = UsageMeter(json.loads(self.valves.MODEL_PRICES)) if show_costs or trace_handler else None
+        if trace_handler:
+            meter.callbacks.append(trace_handler)
         open_step = None
 
         def status(text: str, done: bool = False) -> dict:
@@ -1187,14 +1286,14 @@ class Pipeline:
         def cost_line() -> list:
             # Schließt den laufenden Schritt ab: wiederholt dessen Text mit Tokens und Kosten seit
             # dem letzten Schritt. Ohne Verbrauch, Zähler oder Streaming entsteht keine Zeile.
-            usage = meter.take() if meter else {}
+            usage = meter.take() if show_costs else {}
             if not (streaming and usage and open_step):
                 return []
             return [status(f"{open_step.rstrip(' …')} — {meter.describe(usage)}")]
 
         def summary() -> list:
             # Letzte Zeile der Frage: offenen Schritt abschließen, dann die Summe über alle Modelle.
-            if not (meter and streaming):
+            if not (show_costs and streaming):
                 return []
             return [*cost_line(), status(f"Σ Frage gesamt: {meter.describe(meter.total, per_model=False)}", done=True)]
 
