@@ -46,7 +46,7 @@ Kurs einer Anleihe (bond price). Click the image to open it.</sub>
 - [Graph explorer (TypeScript)](#graph-explorer-typescript)
 - [Setup](#setup)
 - [Configuration](#configuration)
-- [Debugging](#debugging) · [Tracing with Langfuse](#tracing-with-langfuse)
+- [Debugging](#debugging) · [Tracing with Langfuse](#tracing-with-langfuse) · [Comparing eval runs with MLflow](#comparing-eval-runs-with-mlflow)
 - [Tests and CI](#tests-and-ci)
 - [Repository layout](#repository-layout)
 - [Known limitations](#known-limitations)
@@ -493,6 +493,45 @@ so the traces are treated as personal data: Langfuse is in the privacy policy (`
 data processing agreement. Tracing never blocks an answer: without keys,
 with `LANGFUSE_ENABLED` off, or when Langfuse is unreachable the pipeline answers as before.
 
+### Comparing eval runs with MLflow
+
+Langfuse shows what happened in one visitor question; [MLflow](https://mlflow.org) compares whole
+[`eval_chains.py`](data/eval_chains.py) runs. Each run carries the valves and version as parameters, the scores as
+metrics (`mean_steps`, `complete_rate`, `refused_rate`, `mean_sources`, `one_source_rate`, `mean_seconds`,
+`controls_refused_rate`) and its JSON file with all answers as artifact; select runs and press **Compare**.
+MLflow holds only the fixed test questions, no visitor data.
+
+The `mlflow` service only starts with its compose profile and has no login of its own, so it listens on localhost
+only (about 350 MB RAM; its background job workers are switched off). The scripts talk to its REST API with the
+standard library ([`data/mlflow_log.py`](data/mlflow_log.py)), so the pipelines image gets no mlflow package.
+
+1. Start it: locally `docker compose --profile mlflow up -d mlflow`; on the VPS add it to the profiles in `.env`
+   (`COMPOSE_PROFILES=vps,mlflow`), the next deployment starts it. Data lives in `mlflow-data/` (git-ignored; include
+   it in the server backup).
+2. Open it: locally `http://localhost:5000`; on the VPS through `ssh -L 5000:127.0.0.1:5000 <vps>`.
+3. Log a run: set `MLFLOW_TRACKING_URI` for `eval_chains.py`, optionally `--note` on what changed:
+
+   ```bash
+   docker exec -e MLFLOW_TRACKING_URI=http://mlflow:5000 -e APP_VERSION=$(git describe --tags) \
+       open-webui-pipelines-capital python /data/eval_chains.py --set validation \
+       --out /data/eval_v0.9.2_validation.json --note "control run after the release"
+   ```
+
+   A failed MLflow call costs only the entry; the result file is written first.
+4. Earlier result files: [`data/import_eval_history.py`](data/import_eval_history.py) imports them as finished runs
+   at their original time, counts the cited sources in files from before that count existed, and skips runs already
+   imported. An optional notes file adds commit and description per file:
+
+   ```bash
+   docker exec -e MLFLOW_TRACKING_URI=http://mlflow:5000 open-webui-pipelines-capital \
+       python /data/import_eval_history.py "/data/eval_*.json" --notes /data/eval_notes.json
+   ```
+
+On the VPS an eval run shares the pipeline with visitors (15-23 questions, 30-60 s each): use it for a control run
+of the live settings, for example after a release, not for valve experiments; those change the settings for every
+visitor. Try valves locally, and to keep all runs in one place send them to the server's MLflow through the tunnel
+(`MLFLOW_TRACKING_URI=http://host.docker.internal:5000`).
+
 ---
 
 ## Tests and CI
@@ -518,7 +557,8 @@ ruff check . && ruff format --check . && pytest
 ```
 
 The LLM evals ([`data/eval_chains.py`](data/eval_chains.py)) are not part of CI: they cost money and are not
-deterministic. Run them before a release.
+deterministic. Run them before a release; with MLflow the runs can be compared over time (see
+[Comparing eval runs with MLflow](#comparing-eval-runs-with-mlflow)).
 
 ---
 
@@ -530,6 +570,7 @@ deterministic. Run them before a release.
 | [`data/ingest_capital_chunks.py`](data/ingest_capital_chunks.py) | Offline ingestion (classification, embedding, summaries, graph) |
 | [`data/generate_start_suggestions.py`](data/generate_start_suggestions.py), [`data/apply_start_suggestions.py`](data/apply_start_suggestions.py) | Verified start-page questions |
 | [`data/build_public_kb.py`](data/build_public_kb.py) | Builds the public knowledge base (Wikipedia + own texts) and the licence page |
+| [`data/eval_chains.py`](data/eval_chains.py), [`data/mlflow_log.py`](data/mlflow_log.py), [`data/import_eval_history.py`](data/import_eval_history.py) | LLM-judged chain evaluation, its MLflow logging and the import of earlier result files |
 | [`data/export_explorer_graph.py`](data/export_explorer_graph.py) | Exports the concept graph for the graph explorer to `data/explorer/` (git-ignored) |
 | `data/faiss_public_index/`, `data/faiss_capital_index/` | Generated indexes and caches (git-ignored) |
 | [`graph-explorer/`](graph-explorer/) | Graph explorer: TypeScript app, its tests, Dockerfile and Caddyfile |

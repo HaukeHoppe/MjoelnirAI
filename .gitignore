@@ -22,6 +22,8 @@ data/faiss_public_index/
 data/explorer/
 # eval_chains.py results (answers and scores of a run)
 data/eval_*.json
+# MLflow tracking data (runs, metrics, artifacts) of the mlflow compose service
+mlflow-data/
 *.faiss
 *.pkl
 

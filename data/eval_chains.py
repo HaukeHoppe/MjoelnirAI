@@ -8,6 +8,11 @@ a JSON file, so runs before and after a change can be compared.
 
 Run inside the capital pipelines container:
     docker exec open-webui-pipelines-capital python /data/eval_chains.py --out /data/eval_before.json
+
+With MLFLOW_TRACKING_URI set, the run also goes to MLflow (valves as parameters, scores as metrics, the JSON
+file as artifact), e.g. on the VPS:
+    docker exec -e MLFLOW_TRACKING_URI=http://mlflow:5000 -e APP_VERSION=$(git describe --tags) \\
+        open-webui-pipelines-capital python /data/eval_chains.py --out /data/eval_v0.9.2.json --note "..."
 """
 
 import argparse
@@ -18,6 +23,7 @@ import time
 import urllib.request
 
 from langchain_openai import ChatOpenAI
+from mlflow_log import log_run
 from pydantic import BaseModel, Field
 
 QUESTIONS = [
@@ -116,12 +122,67 @@ def cited_sources(answer: str) -> int:
     return len(re.findall(r"^- \[\d+\]", parts[1], re.MULTILINE)) if len(parts) > 1 else 0
 
 
+def summarize(results: list) -> dict:
+    # Fasst einen Lauf zu Kennzahlen zusammen (Kettenfragen und Kontrollfragen getrennt); dieselben Werte
+    # stehen in der Konsole und in MLflow. Ältere Ergebnisdateien ohne "sources"/"control" gehen auch.
+    chains = [r for r in results if not r.get("control")]
+    n = len(chains)
+    metrics = {
+        "questions": n,
+        "mean_steps": sum(r["steps"] for r in chains) / n,
+        "complete_rate": sum(r["complete"] == 2 for r in chains) / n,
+        "mean_depth": sum(r["depth"] for r in chains) / n,
+        "refused_rate": sum(r["refused"] for r in chains) / n,
+        "mean_seconds": sum(r["seconds"] for r in chains) / n,
+    }
+    if all("sources" in r for r in chains):
+        metrics["mean_sources"] = sum(r["sources"] for r in chains) / n
+        metrics["one_source_rate"] = sum(r["sources"] == 1 for r in chains) / n
+    controls = [r for r in results if r.get("control")]
+    if controls:
+        metrics["controls_refused_rate"] = sum(r["refused"] for r in controls) / len(controls)
+    return metrics
+
+
+def valves() -> dict:
+    # Aktuelle Valve-Werte der Pipeline (vom Pipelines-Server), damit ein Lauf seine Einstellungen mitführt.
+    request = urllib.request.Request(
+        "http://localhost:9099/capital_rag_pipeline/valves",
+        headers={"Authorization": f"Bearer {os.environ['PIPELINES_API_KEY']}"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def log_to_mlflow(args, results: list):
+    # Meldet den Lauf an MLflow, falls MLFLOW_TRACKING_URI gesetzt ist; ein Fehler kostet nur den Eintrag,
+    # die Ergebnisdatei ist schon geschrieben.
+    if not os.getenv("MLFLOW_TRACKING_URI"):
+        return
+    try:
+        params = {
+            **valves(),
+            "set": args.set,
+            "judge_model": args.judge_model,
+            "version": os.getenv("APP_VERSION", "unknown"),
+        }
+        tags = {"source": "eval_chains", "mlflow.note.content": args.note} if args.note else {"source": "eval_chains"}
+        run_name = args.run_name or os.path.splitext(os.path.basename(args.out))[0]
+        run_id = log_run(run_name, params, summarize(results), artifact=args.out, tags=tags)
+        print(f"MLflow: run {run_name} ({run_id}) logged to {os.environ['MLFLOW_TRACKING_URI']}")
+    except Exception as e:  # noqa: BLE001 - the result file is written; only the MLflow entry is missing
+        print(f"MLflow: run not logged ({e})")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--judge_model", default="gpt-4.1-mini")
     # tuning: the questions the pipeline was tuned on; validation: held-out questions + controls.
     parser.add_argument("--set", choices=["tuning", "validation"], default="tuning")
+    # MLflow (only with MLFLOW_TRACKING_URI): run name (default: name of --out) and a note on what changed.
+    parser.add_argument("--run_name")
+    parser.add_argument("--note")
     args = parser.parse_args()
     judge = ChatOpenAI(model=args.judge_model, temperature=0).with_structured_output(Judgement)
 
@@ -156,18 +217,17 @@ def main():
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=1)
 
-    chains = [r for r in results if not r["control"]]
-    n = len(chains)
+    m = summarize(results)
+    n = m["questions"]
     print(
-        f"\nmean steps {sum(r['steps'] for r in chains) / n:.1f} | complete chains "
-        f"{sum(r['complete'] == 2 for r in chains)}/{n} | mean depth {sum(r['depth'] for r in chains) / n:.1f} "
-        f"| refused {sum(r['refused'] for r in chains)}/{n} | mean sources "
-        f"{sum(r['sources'] for r in chains) / n:.1f} (one source: {sum(r['sources'] == 1 for r in chains)}/{n}) "
-        f"| mean time {sum(r['seconds'] for r in chains) / n:.0f}s"
+        f"\nmean steps {m['mean_steps']:.1f} | complete chains {round(m['complete_rate'] * n)}/{n} "
+        f"| mean depth {m['mean_depth']:.1f} | refused {round(m['refused_rate'] * n)}/{n} | mean sources "
+        f"{m['mean_sources']:.1f} (one source: {round(m['one_source_rate'] * n)}/{n}) "
+        f"| mean time {m['mean_seconds']:.0f}s"
     )
-    controls = [r for r in results if r["control"]]
-    if controls:
-        print(f"controls correctly not answered: {sum(r['refused'] for r in controls)}/{len(controls)}")
+    if "controls_refused_rate" in m:
+        print(f"controls correctly not answered: {m['controls_refused_rate']:.0%}")
+    log_to_mlflow(args, results)
 
 
 if __name__ == "__main__":
