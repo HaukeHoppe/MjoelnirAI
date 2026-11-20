@@ -1,0 +1,60 @@
+# CD: deploys main to the VPS after CI passed for that commit, or by hand (Actions -> Deploy -> Run workflow).
+# The runner only sends "deploy <sha>" over SSH; the server's deploy key is pinned to deploy/deploy.sh, which
+# checks the commit is on main, builds, restarts what changed, runs health checks and rolls back on failure.
+#
+# Secrets (Settings -> Environments -> production): DEPLOY_HOST (server IP or name), DEPLOY_SSH_KEY (private
+# deploy key), DEPLOY_KNOWN_HOSTS (the server's host key line). Without them the job is skipped with a warning.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer one waits instead of cancelling a deployment halfway.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to mjoelnir.ai
+    # Automatically only after a successful CI run of a push to main; by hand only from main.
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+       && github.event.workflow_run.event == 'push')
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://mjoelnir.ai
+    steps:
+      # Server-Deployment: nur "deploy <sha>" wird gesendet, alles Weitere entscheidet deploy/deploy.sh.
+      - name: Deploy over SSH
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$HOST" ] || [ -z "$SSH_KEY" ] || [ -z "$KNOWN_HOSTS" ]; then
+            echo "::warning::Deploy secrets are not set (environment 'production') - deployment skipped"
+            echo "DEPLOYED=skipped" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 "root@$HOST" "deploy $SHA"
+
+      # Von außen prüfen: Die öffentliche Seite antwortet über Caddy und HTTPS.
+      - name: Public health check
+        if: env.DEPLOYED != 'skipped'
+        run: curl -fsS --retry 6 --retry-delay 10 --retry-all-errors https://mjoelnir.ai/health
