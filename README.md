@@ -357,6 +357,37 @@ certificate and forwards to Open WebUI on the internal network ([`Caddyfile`](Ca
 4. Graph explorer: set `GRAPH_CHAT_URL=/` in `.env`, run `python data/export_explorer_graph.py` (or copy
    `data/explorer/` along) and `docker compose up -d graph-explorer`; Caddy serves it at `/graph/`.
 
+**Continuous deployment.** A push to `main` deploys itself: when CI passes for that commit,
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) sends `deploy <sha>` over SSH, and
+[`deploy/deploy.sh`](deploy/deploy.sh) on the VPS does the rest:
+
+1. checks that the commit is on `origin/main`, newer than the running one, and that nobody edited tracked files on
+   the server (it stops instead of overwriting them);
+2. checks out the commit, builds all images first (a failed build changes nothing), runs `docker compose up -d`,
+   validates and restarts Caddy if `Caddyfile`/`guest.css` changed, restarts `pipelines-capital` if the pipeline
+   changed;
+3. health checks: Open WebUI `/health`, the pipeline listed by the pipelines server, graph explorer, Caddy; then
+   `https://<domain>/health` from GitHub;
+4. if a check fails, it checks out the previous commit, restarts the same way and marks the run as failed.
+
+The data stays untouched: `.env`, `open-webui-data/` and the indexes in `data/` are git-ignored. Start suggestions
+and model descriptions live in the Open WebUI database, so `apply_start_suggestions.py` stays a manual step.
+Log on the VPS: `/var/log/mjoelnir-deploy.log`; history and logs per run: Actions → Deploy (environment
+`production`). A deployment can be repeated by hand: Actions → Deploy → Run workflow (on `main`).
+
+One-time setup:
+
+1. The app directory on the VPS is a git checkout of this repository (`git clone <repo> /opt/open-webui`, or
+   `git init` + `git fetch` + `git reset --hard origin/main` in an existing directory; untracked files stay).
+2. A dedicated deploy key that can only run the deploy script, in `/root/.ssh/authorized_keys`:
+   `restrict,command="/opt/open-webui/deploy/deploy.sh" ssh-ed25519 AAAA... github-actions-deploy`
+3. GitHub → Settings → Environments → `production` (deployment branches: `main` only), secrets
+   `DEPLOY_HOST` (server IP), `DEPLOY_SSH_KEY` (the deploy key's private key) and `DEPLOY_KNOWN_HOSTS`
+   (`ssh-keyscan -t ed25519 <server IP>`, checked against the fingerprint the server shows). Without these secrets
+   the deploy job is skipped with a warning.
+
+Test the deploy script without a server: `bash deploy/test_deploy.sh` (CI runs it, together with ShellCheck).
+
 **Open access without login (optional).** Caddy can sign every visitor in automatically as one shared guest
 account with role `user` (no admin rights; guests share its chat history), while the admin account is only
 reachable through an SSH tunnel:
@@ -448,7 +479,8 @@ When an answer is missing, find which stage is responsible:
 |-----|--------|
 | Python | `ruff check` and `ruff format --check` (rules and line length in [`pyproject.toml`](pyproject.toml)), `pytest` (unit tests without OpenAI calls) |
 | Graph explorer | `tsc` type check, vitest, Vite build |
-| Compose and Caddyfile | `docker compose config` (local and `vps` profile), Caddy built with its plugins validates the Caddyfile |
+| Compose and Caddyfile | `docker compose config` (local and `vps` profile), Caddy built with its plugins validates the Caddyfile, ShellCheck and tests for the deploy script |
+| Deploy (after CI on `main`) | Deploys the commit to the VPS, see [Continuous deployment](#deploying-to-a-vps) |
 | Secret scan | gitleaks on the pushed commits |
 
 The same checks locally:
