@@ -1,0 +1,110 @@
+# CI: lint, tests and config checks on every push to the working branches and on pull requests.
+# Nothing here calls OpenAI or needs a secret; the evals (data/eval_chains.py) stay a manual release step.
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/**", "fix/**", "docs/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Read-only token: no job writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run that is still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Python: ruff mit den Regeln aus pyproject.toml, danach die Unit-Tests ohne OpenAI-Aufrufe.
+  python:
+    name: Python (ruff, pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"   # same as the pipelines container
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check --output-format github .
+      # Formatierung wie lokal mit "ruff format ."; --diff zeigt im Log, was abweicht.
+      - name: Ruff format
+        run: ruff format --check --diff .
+      # Exit code 5 = no tests collected (branches without pipelines-capital/tests); anything else fails.
+      - name: Pytest
+        run: |
+          set +e
+          pytest
+          code=$?
+          if [ $code -eq 5 ]; then echo "No tests collected"; exit 0; fi
+          exit $code
+
+  # Graph-Explorer: gleiche Schritte wie im Dockerfile (Typprüfung, vitest, Vite-Build).
+  graph-explorer:
+    name: Graph explorer (tsc, vitest, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: graph-explorer
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"       # same as graph-explorer/Dockerfile
+          cache: npm
+          cache-dependency-path: graph-explorer/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+
+  # Konfiguration: docker-compose.yaml (lokal und VPS-Profil) und die Caddyfile mit dem echten Caddy-Build.
+  config:
+    name: Compose and Caddyfile
+    runs-on: ubuntu-latest
+    env:
+      # Placeholders for the variables compose requires (":?"); no real secrets.
+      WEBUI_SECRET_KEY: ci-placeholder
+      PIPELINES_API_KEY: ci-placeholder
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compose config (local)
+        run: docker compose config -q
+      - name: Compose config (vps profile)
+        run: docker compose --profile vps config -q
+      - name: Build Caddy with plugins
+        run: docker build -q -f Dockerfile.caddy -t caddy-ci .
+      - name: Validate Caddyfile
+        run: |
+          docker run --rm \
+            -e WEBUI_URL=https://ci.example.com -e ACME_EMAIL=ci@example.com \
+            -e GUEST_EMAIL=guest@example.com -e ADMIN_EMAIL=admin@example.com \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy-ci caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      # Das Deploy-Skript läuft als root auf dem Server: ShellCheck findet Quoting- und Logikfehler vorab.
+      - name: ShellCheck deploy script
+        run: shellcheck deploy/*.sh
+      # Ablauf des Deploy-Skripts gegen ein lokales git-Repo mit Stubs für docker und curl (inkl. Rollback).
+      - name: Deploy script tests
+        run: bash deploy/test_deploy.sh
+
+  # Secrets: gitleaks durchsucht die Commits nach API-Keys, Tokens und Passwörtern.
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0           # full history, so every pushed commit is scanned
+      # Official action: on a push it scans the pushed commits, on a pull request the PR's commits.
+      # Free for repositories of personal accounts (organizations need a GITLEAKS_LICENSE).
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

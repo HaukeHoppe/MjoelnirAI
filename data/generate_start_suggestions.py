@@ -19,22 +19,19 @@ import json
 import os
 import sys
 from itertools import zip_longest
-from typing import List
 
-from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, "/app/pipelines")
-from capital_rag_pipeline import GRADE_PROMPT, Grade, Pipeline, tokenize  # noqa: E402
+from capital_rag_pipeline import GRADE_PROMPT, Grade, Pipeline, tokenize
 
 
 class Starter(BaseModel):
     # Lengths are set by the prompt (short topic suggestions vs. long chain questions).
     title: str = Field(..., description="Topic name, German, as the prompt asks.")
     subtitle: str = Field(..., description="Second line shown under the title, German, as the prompt asks.")
-    question: str = Field(
-        ..., description="The question in German that the text answers, as a user would ask it."
-    )
+    question: str = Field(..., description="The question in German that the text answers, as a user would ask it.")
 
 
 STARTER_PROMPT = """Below is a summary of a topic from a capital-markets knowledge base.
@@ -49,7 +46,7 @@ Topic: {title}
 {content}"""
 
 
-def pick_topics(summaries: List[dict], count: int) -> List[dict]:
+def pick_topics(summaries: list[dict], count: int) -> list[dict]:
     # Best-covered topics first, alternating between market domains so the
     # start page is not all one area.
     by_domain = {}
@@ -73,7 +70,7 @@ Topic: {title}
 {content}"""
 
 
-def chain_topics(index_dir: str, count: int) -> List[dict]:
+def chain_topics(index_dir: str, count: int) -> list[dict]:
     # Cause -> effect chain texts (build_public_kb.py), alternating between market domains.
     with open(os.path.join(index_dir, "extracted_v2_all.json"), encoding="utf-8") as f:
         chunks = [c for c in json.load(f) if c["sources"][0].startswith("Mjoelnir-Wirkungskette")]
@@ -108,17 +105,14 @@ def main():
     )
     pairs = [(s, st) for s, st in zip(topics, starters) if not isinstance(st, Exception)]
     grades = llm.with_structured_output(Grade).batch(
-        [
-            GRADE_PROMPT.format(question=st.question, title=s["title"], content=s["content"])
-            for s, st in pairs
-        ],
+        [GRADE_PROMPT.format(question=st.question, title=s["title"], content=s["content"]) for s, st in pairs],
         config={"max_concurrency": 8},
         return_exceptions=True,
     )
 
     min_relevance = Pipeline.Valves().MIN_RELEVANCE
     suggestions, seen = [], set()
-    for (s, st), grade in zip(pairs, grades):
+    for (_s, st), grade in zip(pairs, grades):
         if isinstance(grade, Exception) or not grade.supports_answer or grade.relevance < min_relevance:
             print(f"skip: {st.question} ({'error' if isinstance(grade, Exception) else grade.reason})")
             continue

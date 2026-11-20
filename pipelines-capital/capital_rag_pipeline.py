@@ -6,66 +6,160 @@ version: 0.4
 license: MIT
 description: RAG over the capital-markets chunks in faiss_public_index (Wikipedia articles and own explanatory texts, built by build_public_kb.py and ingest_capital_chunks.py; INDEX_DIR can point to another index such as faiss_capital_index). Query flow - fusion retrieval (HyPE dense vectors + BM25, adapted from fusion_retrieval.py), concept-graph expansion (graph.json), causal chain search (cause -> effect paths of up to 4 steps through the directed concept graph, with the chunks stating each step), LLM reranking + relevance/grounding grading per chunk (reranking.py / reliable_rag), generation that keeps time-bound opinions attributed to their source, a post-answer grounding check, and a source list that explains why each source was used (explainable_retrieval.py). Explorer mode: without a grounded answer, related covered topics are suggested as verified follow-up questions. Runs in its own pipelines container (pipelines-capital) next to the climate test pipeline.
 requirements: langchain-community,langchain-openai,langchain-core,faiss-cpu,openai,pydantic,rank-bm25,numpy
-"""
+"""  # noqa: E501 - Open WebUI reads each front matter field from a single line
 
 import json
 import os
 import re
+import threading
 from collections import Counter, OrderedDict
+from collections.abc import Generator, Iterator
 from difflib import SequenceMatcher
-from typing import Generator, Iterator, List, Literal, Union
+from itertools import pairwise
+from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
-from rank_bm25 import BM25Okapi
+import tiktoken
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores.utils import DistanceStrategy
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from pydantic import BaseModel, Field
+from rank_bm25 import BM25Okapi
+
+# USD per 1M tokens: [input, cached input, output]. Check openai.com/api/pricing when models change.
+DEFAULT_PRICES = {
+    "gpt-4.1": [2.00, 0.50, 8.00],
+    "gpt-4.1-mini": [0.40, 0.10, 1.60],
+    "gpt-4o": [2.50, 1.25, 10.00],
+    "text-embedding-3-large": [0.13, 0.13, 0.0],
+}
+
+
+class UsageMeter(BaseCallbackHandler):
+    # Zählt Tokens und Kosten einer einzelnen Frage, getrennt nach Modell. Pro Frage eine eigene
+    # Instanz, weil die Pipeline-Instanz von allen Nutzern gleichzeitig verwendet wird.
+
+    def __init__(self, prices: dict):
+        # Zwei Töpfe: "pending" seit dem letzten Schritt, "total" für die ganze Frage.
+        # Das Lock schützt beide, weil grader.batch() aus mehreren Threads gleichzeitig meldet.
+        self.prices = prices
+        self.lock = threading.Lock()
+        self.pending, self.total = {}, {}
+
+    def on_llm_end(self, response, **kwargs):
+        # Wird von LangChain nach jedem Chat-Aufruf aufgerufen (invoke, batch, stream, structured output)
+        # und liest die exakten Token-Zahlen, die OpenAI zurückgemeldet hat, samt verwendetem Modell.
+        message = getattr(response.generations[0][0], "message", None)
+        usage = getattr(message, "usage_metadata", None)
+        if not usage:
+            return
+        model = (response.llm_output or {}).get("model_name") or message.response_metadata.get("model_name", "?")
+        cached = (usage.get("input_token_details") or {}).get("cache_read", 0) or 0
+        self._add(model, usage["input_tokens"], cached, usage["output_tokens"])
+
+    def add_embedding(self, model: str, texts: list[str]):
+        # Embeddings melden über LangChain keine Usage: tiktoken zählt genau die Tokens, nach denen
+        # OpenAI abrechnet. Embeddings haben keine Output-Tokens.
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        self._add(model, sum(len(encoding.encode(t)) for t in texts), 0, 0)
+
+    def _key(self, model: str) -> str:
+        # Ordnet z. B. "gpt-4.1-mini-2025-04-14" dem Preiseintrag zu; der längste passende Präfix
+        # gewinnt, damit gpt-4.1-mini nicht als gpt-4.1 zählt.
+        keys = [k for k in self.prices if model.startswith(k)]
+        return max(keys, key=len) if keys else model
+
+    def _add(self, model: str, inp: int, cached: int, out: int):
+        # Addiert einen Aufruf in beide Töpfe; eine Zeile ist [input, davon cached, output].
+        with self.lock:
+            for bucket in (self.pending, self.total):
+                row = bucket.setdefault(self._key(model), [0, 0, 0])
+                row[0] += inp
+                row[1] += cached
+                row[2] += out
+
+    def take(self) -> dict:
+        # Gibt den Verbrauch seit dem letzten Schritt zurück und leert den pending-Topf.
+        with self.lock:
+            usage, self.pending = self.pending, {}
+        return usage
+
+    def cost(self, model: str, row: list) -> float:
+        # Kosten in USD: ungecachter Input + gecachter Input + Output, je × Preis / 1 Mio.
+        # Unbekannte Modelle kosten 0 und werden in describe() markiert.
+        p_in, p_cached, p_out = self.prices.get(model, (0, 0, 0))
+        inp, cached, out = row
+        return ((inp - cached) * p_in + cached * p_cached + out * p_out) / 1e6
+
+    def describe(self, usage: dict, per_model: bool = True) -> str:
+        # Text für die Statuszeile im deutschen Zahlenformat. per_model=True: eine Angabe je
+        # Modell; False: nur die Summe über alle Modelle (Gesamtzeile).
+        def num(n: int) -> str:
+            # Ganzzahl mit Punkt als Tausendertrenner, z. B. 12.345.
+            return f"{n:,}".replace(",", ".")
+
+        def money(c: float) -> str:
+            # Dollarbetrag mit Komma und vier Nachkommastellen; Kleinstbeträge als "<0,0001 $".
+            return "<0,0001 $" if 0 < c < 1e-4 else f"{c:.4f} $".replace(".", ",")
+
+        total = sum(self.cost(m, r) for m, r in usage.items())
+        if not per_model:
+            inp = sum(r[0] for r in usage.values())
+            out = sum(r[2] for r in usage.values())
+            return f"{num(inp)} in / {num(out)} out · {money(total)}"
+        parts = []
+        for model, (inp, cached, out) in usage.items():
+            name = model if model in self.prices else f"{model} (Preis unbekannt)"
+            hint = f" ({num(cached)} cached)" if cached else ""
+            parts.append(f"{name}: {num(inp)} in{hint} / {num(out)} out")
+        return " · ".join(parts) + f" · {money(total)}"
+
+
+def run_config(meter, **extra) -> dict:
+    # LangChain-Config für einen Aufruf: hängt den Zähler als Callback an, falls es einen gibt.
+    # Ohne Zähler (z. B. generate_start_suggestions.py) bleibt alles wie bisher.
+    return {**extra, **({"callbacks": [meter]} if meter else {})}
 
 
 class Grade(BaseModel):
     relevance: int = Field(..., ge=0, le=10, description="Relevance to the question, 0-10.")
-    supports_answer: bool = Field(
-        ..., description="True only if the document directly helps answer the question."
-    )
+    supports_answer: bool = Field(..., description="True only if the document directly helps answer the question.")
     states_step: bool = Field(
         ...,
-        description="True if the document states at least one cause -> effect link of the chain the question asks about, even if it does not answer the whole question.",
+        description="True if the document states at least one cause -> effect link of the chain the question asks "
+        "about, even if it does not answer the whole question.",
     )
-    reason: str = Field(
-        ..., description="One short sentence, in the language of the question, why."
-    )
+    reason: str = Field(..., description="One short sentence, in the language of the question, why.")
 
 
 class Claim(BaseModel):
     claim: str = Field(..., description="One claim from the answer.")
     kind: Literal["fact", "meta"] = Field(
         ...,
-        description="meta = only says what the sources do/don't cover, or compares claims from the context without adding information.",
+        description="meta = only says what the sources do/don't cover, or compares claims from the context "
+        "without adding information.",
     )
     quote: str = Field(
         ...,
         description="Verbatim passage copied from the context that states the claim; empty if none.",
     )
-    claim_cause: str = Field(
-        "", description="If the claim states a cause -> effect: the cause named in the claim."
-    )
+    claim_cause: str = Field("", description="If the claim states a cause -> effect: the cause named in the claim.")
     quote_cause: str = Field(
         "", description="If the claim states a cause -> effect: the cause the quote gives for that effect."
     )
-    same_cause: bool = Field(
-        True, description="False if claim_cause and quote_cause are different causes."
-    )
-    supported: bool = Field(
-        ..., description="fact: true only if the quote states it. meta: true if it is accurate."
-    )
+    same_cause: bool = Field(True, description="False if claim_cause and quote_cause are different causes.")
+    supported: bool = Field(..., description="fact: true only if the quote states it. meta: true if it is accurate.")
     answer_sentence: str = Field(
         ..., description="The sentence of the answer that contains the claim, copied verbatim."
     )
 
 
 class AnswerCheck(BaseModel):
-    claims: List[Claim] = Field(default_factory=list)
+    claims: list[Claim] = Field(default_factory=list)
 
 
 class Corroboration(BaseModel):
@@ -76,7 +170,7 @@ class Corroboration(BaseModel):
 
 
 class Corroborations(BaseModel):
-    items: List[Corroboration] = Field(default_factory=list)
+    items: list[Corroboration] = Field(default_factory=list)
 
 
 class Suggestion(BaseModel):
@@ -89,12 +183,12 @@ class Suggestion(BaseModel):
 
 
 class Suggestions(BaseModel):
-    suggestions: List[Suggestion] = Field(default_factory=list)
+    suggestions: list[Suggestion] = Field(default_factory=list)
 
 
 class QueryConcepts(BaseModel):
-    causes: List[str] = Field(default_factory=list, description="Triggers / causes named in the question")
-    effects: List[str] = Field(default_factory=list, description="Effects the question asks about; empty if none")
+    causes: list[str] = Field(default_factory=list, description="Triggers / causes named in the question")
+    effects: list[str] = Field(default_factory=list, description="Effects the question asks about; empty if none")
 
 
 QUERY_CONCEPTS_PROMPT = """Name the cause -> effect concepts in this capital-markets question as short English
@@ -116,7 +210,7 @@ reason: one short sentence in the language of the question.
 Question: {question}
 
 Document: {title}
-{content}"""
+{content}"""  # noqa: E501 - prompt text, sent verbatim
 
 ANSWER_PROMPT = """Answer the question using ONLY the context below. If the context doesn't support an answer, say so.
 Cite the context blocks you use as [1], [2], ... after every statement that relies on them.
@@ -149,7 +243,7 @@ Answer in the language of the question.
 Context:
 {context}
 
-Question: {question}"""
+Question: {question}"""  # noqa: E501 - prompt text, sent verbatim
 
 CHECK_PROMPT = """Check every factual claim in the answer against the context.
 
@@ -174,7 +268,7 @@ Context:
 {context}
 
 Answer:
-{answer}"""
+{answer}"""  # noqa: E501 - prompt text, sent verbatim
 
 CORROBORATE_PROMPT = """Below is a checked answer with citations [n], split into numbered lines (L1, L2, ...), and the context blocks it was written from.
 For every line of the answer that states a fact, look for OTHER blocks (not already cited in that line) that state the same fact themselves.
@@ -191,7 +285,7 @@ Context:
 {context}
 
 Answer:
-{answer}"""
+{answer}"""  # noqa: E501 - prompt text, sent verbatim
 
 REVISE_PROMPT = """Rewrite the answer to fix the problems listed below.
 - "not stated in the sources": remove the statement. Do not replace it with a sentence that repeats or denies it ("Die Quellen erklären nicht, dass ...") - that is a new claim about the sources and often wrong. Only if the removal leaves part of the question unanswered, you may add one general note such as "Zu <Aspekt der Frage> sagen die Quellen nichts."
@@ -209,7 +303,7 @@ Answer:
 {answer}
 
 Problems:
-{unsupported}"""
+{unsupported}"""  # noqa: E501 - prompt text, sent verbatim
 
 EXPLORE_PROMPT = """{situation}
 Below are topics that ARE covered in the indexed capital-markets sources, each with an excerpt from the sources.
@@ -224,7 +318,7 @@ Skip topics that have nothing to do with the user's interest. Returning fewer to
 User's question: {question}
 
 Topics:
-{topics}"""
+{topics}"""  # noqa: E501 - prompt text, sent verbatim
 
 EXPLORE_NO_ANSWER = (
     "The user asked a question that the sources do not answer.",
@@ -232,7 +326,8 @@ EXPLORE_NO_ANSWER = (
 )
 EXPLORE_ANSWERED = (
     "The user asked a question and already got an answer from the sources.",
-    "the user would most likely want to explore next to deepen or broaden that answer. Do not pick topics that only repeat the question",
+    "the user would most likely want to explore next to deepen or broaden that answer. "
+    "Do not pick topics that only repeat the question",
 )
 
 NO_ANSWER = (
@@ -304,9 +399,7 @@ def quote_in_context(quote: str, context: str) -> bool:
         return False
     if quote in context:
         return True
-    match = SequenceMatcher(None, context, quote, autojunk=False).find_longest_match(
-        0, len(context), 0, len(quote)
-    )
+    match = SequenceMatcher(None, context, quote, autojunk=False).find_longest_match(0, len(context), 0, len(quote))
     return match.size >= 0.9 * len(quote)
 
 
@@ -336,7 +429,7 @@ def parse_video(source: str) -> tuple:
     return (re.sub(r"_transcript$", "", re.sub(r"\s*#\d+$", "", source)), "")
 
 
-def required_videos(quote: str, blocks: List[dict]) -> List[tuple]:
+def required_videos(quote: str, blocks: list[dict]) -> list[tuple]:
     # The videos a quoted statement must be attributed to; empty if it comes from
     # a CONCEPT block or a TIMELESS relation line (may be stated generally).
     matched = [b for b in blocks if quote_in_context(quote, b["text"])]
@@ -355,14 +448,16 @@ def paragraph_of(answer: str, sentence: str) -> str:
 
     def overlap(paragraph: str) -> int:
         paragraph = normalize(paragraph)
-        return SequenceMatcher(None, paragraph, sentence, autojunk=False).find_longest_match(
-            0, len(paragraph), 0, len(sentence)
-        ).size
+        return (
+            SequenceMatcher(None, paragraph, sentence, autojunk=False)
+            .find_longest_match(0, len(paragraph), 0, len(sentence))
+            .size
+        )
 
     return max(paragraphs, key=overlap)
 
 
-def drop_sentences(answer: str, sentences: List[str]) -> str:
+def drop_sentences(answer: str, sentences: list[str]) -> str:
     # Removes the answer sentences the checker flagged (matched fuzzily, since
     # the checker copies them only roughly verbatim). Line structure is kept, so
     # bullet lists stay lists; lines left empty are dropped.
@@ -383,7 +478,7 @@ def drop_sentences(answer: str, sentences: List[str]) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
-def names_video(paragraph: str, videos: List[tuple]) -> bool:
+def names_video(paragraph: str, videos: list[tuple]) -> bool:
     key = video_key(paragraph)
     return any(video_key(title) in key or (vid and vid in paragraph) for title, vid in videos)
 
@@ -403,7 +498,7 @@ STOPWORDS = set(
 )
 
 
-def tokenize(text: str) -> List[str]:
+def tokenize(text: str) -> list[str]:
     return [t for t in re.findall(r"\w+", text.lower()) if t not in STOPWORDS]
 
 
@@ -444,7 +539,7 @@ def minmax(scores: dict) -> dict:
         return {}
     lo, hi = min(scores.values()), max(scores.values())
     if hi == lo:
-        return {k: 1.0 for k in scores}
+        return dict.fromkeys(scores, 1.0)
     return {k: (v - lo) / (hi - lo) for k, v in scores.items()}
 
 
@@ -515,6 +610,10 @@ class Pipeline:
         # A topic (graph concept) must appear in at least this many chunks to be
         # suggested, so the user is not sent to a one-off mention.
         EXPLORE_MIN_CHUNKS: int = 2
+        # Shows tokens (input/output) and cost per step and per question in the status line.
+        SHOW_COSTS: bool = True
+        # USD per 1M tokens as JSON: {"model prefix": [input, cached input, output]}.
+        MODEL_PRICES: str = json.dumps(DEFAULT_PRICES)
 
     def __init__(self):
         self.name = "Capital Markets RAG"
@@ -562,7 +661,8 @@ class Pipeline:
             self._build_keyword_index()
             self._load_graph()
 
-        self.llm = ChatOpenAI(model=self.valves.LLM_MODEL, temperature=0, streaming=True)
+        # stream_usage: OpenAI reports token usage for streamed answers too (cost display).
+        self.llm = ChatOpenAI(model=self.valves.LLM_MODEL, temperature=0, streaming=True, stream_usage=True)
         self.answer_llm = ChatOpenAI(model=self.valves.LLM_MODEL, temperature=0)
         grader_llm = ChatOpenAI(model=self.valves.GRADER_MODEL, temperature=0)
         self.grader = grader_llm.with_structured_output(Grade)
@@ -629,7 +729,7 @@ class Pipeline:
                 return
         try:
             vectors = np.array(OpenAIEmbeddings(model=self.valves.EMBEDDING_MODEL).embed_documents(names))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional feature, the pipeline runs without it
             print(f"[capital_rag] Concept vectors failed, chain search disabled: {e}")
             return
         vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -648,13 +748,13 @@ class Pipeline:
     async def on_valves_updated(self):
         self._load()
 
-    def _fusion_candidates(self, query: str) -> List[tuple]:
+    def _fusion_candidates(self, query: str, meter=None) -> list[tuple]:
         # Adapted from fusion_retrieval.py: min-max normalized dense and BM25
         # scores, combined with ALPHA. Dense scores are per chunk (best vector).
+        if meter:
+            meter.add_embedding(self.valves.EMBEDDING_MODEL, [query])
         dense = {}
-        for doc, score in self.vectorstore.similarity_search_with_score(
-            query, k=self.valves.FETCH_K
-        ):
+        for doc, score in self.vectorstore.similarity_search_with_score(query, k=self.valves.FETCH_K):
             if score < self.valves.MIN_SIMILARITY:
                 continue
             chunk_id = doc.metadata["chunk_id"]
@@ -667,14 +767,13 @@ class Pipeline:
         dense_n, keyword_n = minmax(dense), minmax(keyword)
         alpha = self.valves.ALPHA
         fused = {
-            chunk_id: alpha * dense_n.get(chunk_id, 0.0)
-            + (1 - alpha) * keyword_n.get(chunk_id, 0.0)
+            chunk_id: alpha * dense_n.get(chunk_id, 0.0) + (1 - alpha) * keyword_n.get(chunk_id, 0.0)
             for chunk_id in set(dense) | set(keyword)
         }
         ranked = sorted(fused.items(), key=lambda item: item[1], reverse=True)
         return ranked[: self.valves.CANDIDATE_K]
 
-    def _graph_expand(self, candidates: List[tuple]) -> List[tuple]:
+    def _graph_expand(self, candidates: list[tuple]) -> list[tuple]:
         # Chunks from other passages/videos that assert the same relation
         # (source -> target, direction) as the top seeds.
         present = {chunk_id for chunk_id, _ in candidates}
@@ -688,10 +787,12 @@ class Pipeline:
                         extra.append((other, 0.0))
         return candidates + extra[: self.valves.GRAPH_EXPAND_K]
 
-    def _match_concepts(self, phrases: List[str]) -> dict:
+    def _match_concepts(self, phrases: list[str], meter=None) -> dict:
         # Question concept phrases -> graph concepts (top 3 per phrase above CONCEPT_MIN_SIMILARITY).
         if not phrases or self.concept_vectors is None:
             return {}
+        if meter:
+            meter.add_embedding(self.valves.EMBEDDING_MODEL, phrases)
         vectors = np.array(self.vectorstore.embedding_function.embed_documents(phrases), dtype=np.float32)
         vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
         matched = {}
@@ -702,12 +803,12 @@ class Pipeline:
                     matched[name] = max(float(row[i]), matched.get(name, 0.0))
         return matched
 
-    def _causal_paths(self, question: str) -> List[List[str]]:
+    def _causal_paths(self, question: str, meter=None) -> list[list[str]]:
         # Directed cause -> effect paths through the concept graph, from the question's causes to its
         # effects (breadth-first, so shorter paths first). Without effects: the strongest onward chains.
-        asked = self.concept_extractor.invoke(QUERY_CONCEPTS_PROMPT.format(question=question))
-        starts = self._match_concepts(asked.causes)
-        ends = self._match_concepts(asked.effects)
+        asked = self.concept_extractor.invoke(QUERY_CONCEPTS_PROMPT.format(question=question), config=run_config(meter))
+        starts = self._match_concepts(asked.causes, meter)
+        ends = self._match_concepts(asked.effects, meter)
         if not starts:
             return []
         max_hops, wanted = self.valves.CHAIN_MAX_HOPS, self.valves.CHAIN_PATHS
@@ -729,15 +830,15 @@ class Pipeline:
                             nxt.append(target)
                 frontier = nxt
 
-            def back(node: str, path: List[str]) -> Iterator[List[str]]:
+            def back(node: str, path: list[str]) -> Iterator[list[str]]:
                 if node in starts:
-                    yield [node] + path
+                    yield [node, *path]
                     return
                 if len(path) >= max_hops:
                     return
                 for prev in preds.get(node, []):
                     if prev not in path:
-                        yield from back(prev, [node] + path)
+                        yield from back(prev, [node, *path])
 
             for end in sorted(ends, key=ends.get, reverse=True):
                 for path in back(end, []):
@@ -749,23 +850,28 @@ class Pipeline:
                 for first, _ in self.out_edges.get(start, Counter()).most_common(2):
                     path = [start, first]
                     while len(path) <= max_hops:
-                        options = [t for t, _ in self.out_edges.get(path[-1], Counter()).most_common(5)
-                                   if t not in path]
+                        options = [
+                            t for t, _ in self.out_edges.get(path[-1], Counter()).most_common(5) if t not in path
+                        ]
                         if not options:
                             break
                         path.append(options[0])
                     paths.append(path)
+
         # Shorter and better-supported paths first.
-        support = lambda p: sum(self.out_edges[a][b] for a, b in zip(p, p[1:]))
+        def support(p: list[str]) -> int:
+            # Wie oft die Schritte des Pfads in den Quellen belegt sind (Summe der Kantengewichte).
+            return sum(self.out_edges[a][b] for a, b in pairwise(p))
+
         paths.sort(key=lambda p: (len(p), -support(p)))
         return paths[:wanted]
 
-    def _path_chunks(self, paths: List[List[str]], present: set) -> List[int]:
+    def _path_chunks(self, paths: list[list[str]], present: set) -> list[int]:
         # The chunks that state the steps of the paths: a greedy cover, preferring chunks that state
         # several steps at once (typically a chain text).
         step_chunks = {}
         for path in paths:
-            for a, b in zip(path, path[1:]):
+            for a, b in pairwise(path):
                 ids = {c for (s, t, _), chunks in self.relation_chunks.items() if s == a and t == b for c in chunks}
                 step_chunks[(a, b)] = {c for c in ids if c in self.docs}
         uncovered, chosen = set(step_chunks), []
@@ -781,18 +887,16 @@ class Pipeline:
             uncovered = {s for s in uncovered if best not in step_chunks[s]}
         return chosen
 
-    def _grade(self, query: str, candidates: List[tuple], path_ids: frozenset = frozenset()) -> List[tuple]:
+    def _grade(self, query: str, candidates: list[tuple], path_ids: frozenset = frozenset(), meter=None) -> list[tuple]:
         # reranking.py-style 0-10 LLM scoring combined with reliable_rag's
         # relevance grading: unsupported chunks are dropped before generation.
         docs = [self.docs[chunk_id] for chunk_id, _ in candidates]
         grades = self.grader.batch(
             [
-                GRADE_PROMPT.format(
-                    question=query, title=doc.metadata["title"], content=doc.page_content
-                )
+                GRADE_PROMPT.format(question=query, title=doc.metadata["title"], content=doc.page_content)
                 for doc in docs
             ],
-            config={"max_concurrency": 8},
+            config=run_config(meter, max_concurrency=8),
             return_exceptions=True,
         )
         kept, steps = [], []
@@ -812,8 +916,13 @@ class Pipeline:
         return kept[: self.valves.TOP_K] + steps[: self.valves.CHAIN_TOP_K]
 
     def _explore(
-        self, query: str, candidates: List[tuple], answered: bool = False, exclude: set = frozenset()
-    ) -> List[tuple]:
+        self,
+        query: str,
+        candidates: list[tuple],
+        answered: bool = False,
+        exclude: set = frozenset(),
+        meter=None,
+    ) -> list[tuple]:
         # Explorer mode: the concepts of the closest chunks (and graph neighbours
         # of those) are topics the index covers. Without an answer they are
         # offered instead; after an answer as further topics, with the chunks the
@@ -823,9 +932,9 @@ class Pipeline:
         pool = [chunk_id for chunk_id, _ in candidates]
         if not pool:
             # Nothing passed MIN_SIMILARITY or BM25: take the nearest chunks anyway.
-            for doc, _ in self.vectorstore.similarity_search_with_score(
-                query, k=self.valves.FETCH_K
-            ):
+            if meter:
+                meter.add_embedding(self.valves.EMBEDDING_MODEL, [query])
+            for doc, _ in self.vectorstore.similarity_search_with_score(query, k=self.valves.FETCH_K):
                 if doc.metadata["chunk_id"] not in pool:
                     pool.append(doc.metadata["chunk_id"])
 
@@ -868,7 +977,8 @@ class Pipeline:
                 n=self.valves.EXPLORE_SUGGESTIONS,
                 question=query,
                 topics=listing,
-            )
+            ),
+            config=run_config(meter),
         ).suggestions
         seen, proposals = set(), []
         for s in picked:
@@ -884,12 +994,10 @@ class Pipeline:
         # against its excerpt with the same bar as normal retrieval.
         grades = self.grader.batch(
             [
-                GRADE_PROMPT.format(
-                    question=s.question, title=doc.metadata["title"], content=doc.page_content
-                )
+                GRADE_PROMPT.format(question=s.question, title=doc.metadata["title"], content=doc.page_content)
                 for s, doc in proposals
             ],
-            config={"max_concurrency": 8},
+            config=run_config(meter, max_concurrency=8),
             return_exceptions=True,
         )
         return [
@@ -900,7 +1008,7 @@ class Pipeline:
             and grade.relevance >= self.valves.MIN_RELEVANCE
         ]
 
-    def _remember(self, query: str, candidates: List[tuple], exclude: set, suggestions) -> None:
+    def _remember(self, query: str, candidates: list[tuple], exclude: set, suggestions) -> None:
         # suggestions None = not computed yet; _follow_ups computes them lazily,
         # in the background task after the answer is already shown.
         self.recent.pop(query, None)
@@ -925,21 +1033,17 @@ class Pipeline:
         if entry is None:
             return json.dumps({"follow_ups": []})
         if entry["suggestions"] is None:
-            entry["suggestions"] = self._explore(
-                query, entry["candidates"], answered=True, exclude=entry["exclude"]
-            )
-        return json.dumps(
-            {"follow_ups": [q for _, q in entry["suggestions"]]}, ensure_ascii=False
-        )
+            entry["suggestions"] = self._explore(query, entry["candidates"], answered=True, exclude=entry["exclude"])
+        return json.dumps({"follow_ups": [q for _, q in entry["suggestions"]]}, ensure_ascii=False)
 
-    def _unsupported_claims(self, context: str, blocks: List[dict], answer: str) -> tuple:
+    def _unsupported_claims(self, context: str, blocks: list[dict], answer: str, meter=None) -> tuple:
         # reliable_rag-style hallucination check, per claim: a claim only counts
         # as supported if the checker says so AND (for facts) its quote really is
         # in the context. Meta claims ("the sources don't explain why") need no quote.
         # Also returns whether the answer has any fact claim at all - an answer of
         # only meta claims ("the sources don't cover this") is a refusal - and the
         # answer sentences the problems were found in.
-        check = self.checker.invoke(CHECK_PROMPT.format(context=context, answer=answer))
+        check = self.checker.invoke(CHECK_PROMPT.format(context=context, answer=answer), config=run_config(meter))
         has_facts = any(claim.kind == "fact" for claim in check.claims)
         unsupported, sentences = [], []
         for claim in check.claims:
@@ -963,13 +1067,15 @@ class Pipeline:
             sentences.append(claim.answer_sentence)
         return unsupported, has_facts, sentences
 
-    def _corroborate(self, answer: str, context: str, blocks: List[dict]) -> tuple:
+    def _corroborate(self, answer: str, context: str, blocks: list[dict], meter=None) -> tuple:
         # Cites further blocks in lines of the checked answer (a chain step is one line) when they state the
         # same. Accepted only if the line cites something already, the block is a concept block not yet cited
         # there, and the quote really is in that block. Returns the answer and the number added.
         lines = answer.split("\n")
         numbered = "\n".join(f"L{i}: {line}" for i, line in enumerate(lines, start=1) if line.strip())
-        found = self.corroborator.invoke(CORROBORATE_PROMPT.format(context=context, answer=numbered))
+        found = self.corroborator.invoke(
+            CORROBORATE_PROMPT.format(context=context, answer=numbered), config=run_config(meter)
+        )
         added = {}
         for item in found.items:
             if not (item.same_statement and 1 <= item.line <= len(lines) and 1 <= item.block <= len(blocks)):
@@ -977,28 +1083,34 @@ class Pipeline:
             line, block = lines[item.line - 1], blocks[item.block - 1]
             new = added.get(item.line, set())
             cited = cited_numbers(line, len(blocks))
-            if (not cited or item.block in cited | new or block["opinion"]
-                    or len(new) >= self.valves.CORROBORATE_MAX_PER_LINE
-                    or not quote_in_context(item.quote, block["text"])):
+            if (
+                not cited
+                or item.block in cited | new
+                or block["opinion"]
+                or len(new) >= self.valves.CORROBORATE_MAX_PER_LINE
+                or not quote_in_context(item.quote, block["text"])
+            ):
                 continue
             added.setdefault(item.line, set()).add(item.block)
         for number, blocks_added in added.items():
             # The new citations go right after the line's last citation group.
             line = lines[number - 1]
             last = list(re.finditer(r"\[\d+(?:\s*,\s*\d+)*\]", line))[-1]
-            lines[number - 1] = line[: last.end()] + "".join(f"[{n}]" for n in sorted(blocks_added)) + line[last.end():]
+            lines[number - 1] = (
+                line[: last.end()] + "".join(f"[{n}]" for n in sorted(blocks_added)) + line[last.end() :]
+            )
         return "\n".join(lines), sum(len(n) for n in added.values())
 
-    def _grounded_answer(self, question: str, context: str, blocks: List[dict]) -> Iterator[tuple]:
+    def _grounded_answer(self, question: str, context: str, blocks: list[dict], meter=None) -> Iterator[tuple]:
         # Yields ("status", short, detail) progress steps and finally
         # ("answer", text or None, has_facts).
         yield ("status", "Formuliere Antwort nur aus den Quellen …", None)
         answer = self.answer_llm.invoke(
-            ANSWER_PROMPT.format(context=context, question=question)
+            ANSWER_PROMPT.format(context=context, question=question), config=run_config(meter)
         ).content
         for attempt in range(self.valves.MAX_REVISIONS + 1):
             yield ("status", "Prüfe jede Aussage gegen die Quellen …", None)
-            unsupported, has_facts, sentences = self._unsupported_claims(context, blocks, answer)
+            unsupported, has_facts, sentences = self._unsupported_claims(context, blocks, answer, meter)
             if not unsupported:
                 yield ("status", "Alle Aussagen sind durch die Quellen belegt ✓", None)
                 yield ("answer", answer, has_facts)
@@ -1006,8 +1118,7 @@ class Pipeline:
             yield (
                 "status",
                 f"{len(unsupported)} Aussage(n) nicht sauber belegt",
-                f"{len(unsupported)} Aussage(n) nicht sauber belegt:\n"
-                + "\n".join(f"  - {c}" for c in unsupported),
+                f"{len(unsupported)} Aussage(n) nicht sauber belegt:\n" + "\n".join(f"  - {c}" for c in unsupported),
             )
             if attempt == self.valves.MAX_REVISIONS:
                 break
@@ -1018,7 +1129,8 @@ class Pipeline:
                     question=question,
                     answer=answer,
                     unsupported="\n".join(f"- {c}" for c in unsupported),
-                )
+                ),
+                config=run_config(meter),
             ).content
             # The prompt labels the draft "Answer:"; the model sometimes echoes it.
             answer = re.sub(r"^\s*\**(answer|antwort)\**\s*:\s*\**\s*", "", answer, flags=re.IGNORECASE)
@@ -1027,7 +1139,7 @@ class Pipeline:
         trimmed = drop_sentences(answer, sentences)
         if trimmed and trimmed != answer:
             yield ("status", "Entferne nicht belegte Sätze und prüfe erneut …", None)
-            unsupported, has_facts, _ = self._unsupported_claims(context, blocks, trimmed)
+            unsupported, has_facts, _ = self._unsupported_claims(context, blocks, trimmed, meter)
             if not unsupported and has_facts:
                 yield ("status", "Verbleibende Aussagen sind belegt ✓", None)
                 yield ("answer", trimmed, has_facts)
@@ -1035,9 +1147,7 @@ class Pipeline:
         yield ("status", "Keine vollständig belegte Antwort möglich.", None)
         yield ("answer", None, False)
 
-    def pipe(
-        self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Union[str, Generator, Iterator]:
+    def pipe(self, user_message: str, model_id: str, messages: list[dict], body: dict) -> str | Generator | Iterator:
         if user_message.startswith("### Task:"):
             # Open WebUI background task, not a question: follow-ups come from the
             # explorer, everything else (title, tags) from the plain LLM.
@@ -1046,7 +1156,7 @@ class Pipeline:
                     yield self._follow_ups(user_message) if self.valves.EXPLORE_MODE else "{}"
                 else:
                     yield self.answer_llm.invoke(user_message).content
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - background task, Open WebUI gets an empty result
                 print(f"[capital_rag] Task failed: {e}")
                 yield "{}"
             return
@@ -1066,14 +1176,36 @@ class Pipeline:
         # the full step log (incl. rejected claims) into a collapsible <think> block.
         streaming = body.get("stream", True)
         log_open = False
+        # Cost display: tokens and cost of each step, then the question's total (SHOW_COSTS).
+        meter = UsageMeter(json.loads(self.valves.MODEL_PRICES)) if self.valves.SHOW_COSTS else None
+        open_step = None
 
-        def step(short: str, detail: str = None, done: bool = False) -> list:
-            nonlocal log_open
+        def status(text: str, done: bool = False) -> dict:
+            # Ein Open-WebUI-Status-Event, also eine Zeile in der grauen Statuszeile.
+            return {"event": {"type": "status", "data": {"description": text, "done": done}}}
+
+        def cost_line() -> list:
+            # Schließt den laufenden Schritt ab: wiederholt dessen Text mit Tokens und Kosten seit
+            # dem letzten Schritt. Ohne Verbrauch, Zähler oder Streaming entsteht keine Zeile.
+            usage = meter.take() if meter else {}
+            if not (streaming and usage and open_step):
+                return []
+            return [status(f"{open_step.rstrip(' …')} — {meter.describe(usage)}")]
+
+        def summary() -> list:
+            # Letzte Zeile der Frage: offenen Schritt abschließen, dann die Summe über alle Modelle.
+            if not (meter and streaming):
+                return []
+            return [*cost_line(), status(f"Σ Frage gesamt: {meter.describe(meter.total, per_model=False)}", done=True)]
+
+        def step(short: str, detail: str | None = None, done: bool = False) -> list:
+            # Sendet einen neuen Fortschrittsschritt; vorher die Kostenzeile des vorherigen Schritts.
+            nonlocal log_open, open_step
             out = []
             if streaming:
-                out.append(
-                    {"event": {"type": "status", "data": {"description": short, "done": done}}}
-                )
+                out += cost_line()
+                out.append(status(short, done))
+            open_step = short
             if self.valves.SHOW_THINKING_LOG:
                 if not log_open:
                     out.append("<think>\n")
@@ -1090,8 +1222,8 @@ class Pipeline:
                 return []
             yield from step(f"{reason} – suche verwandte Themen …")
             try:
-                return self._explore(user_message, candidates, exclude=exclude)
-            except Exception as e:
+                return self._explore(user_message, candidates, exclude=exclude, meter=meter)
+            except Exception as e:  # noqa: BLE001 - suggestions are optional
                 print(f"[capital_rag] Explorer failed: {e}")
                 return []
 
@@ -1120,25 +1252,24 @@ class Pipeline:
             if suggestions:
                 reason = f"{reason} – {len(suggestions)} verwandte Themen gefunden"
             yield from step(reason, done=True)
+            yield from summary()
             yield from close_log()
             yield NO_ANSWER
             yield from related_block(suggestions)
 
         yield from step("Durchsuche die Quellen …")
-        candidates = self._fusion_candidates(user_message)
+        candidates = self._fusion_candidates(user_message, meter)
         yield from step(f"{len(candidates)} Kandidaten gefunden")
         expanded = self._graph_expand(candidates)
         if len(expanded) > len(candidates):
-            yield from step(
-                f"Konzeptgraph: {len(expanded) - len(candidates)} verwandte Abschnitte ergänzt"
-            )
+            yield from step(f"Konzeptgraph: {len(expanded) - len(candidates)} verwandte Abschnitte ergänzt")
         candidates = expanded
         paths, path_ids = [], frozenset()
         if self.valves.CHAIN_SEARCH and self.concept_vectors is not None:
             yield from step("Suche Wirkungsketten im Konzeptgraphen …")
             try:
-                paths = self._causal_paths(user_message)
-            except Exception as e:
+                paths = self._causal_paths(user_message, meter)
+            except Exception as e:  # noqa: BLE001 - the answer continues without chain paths
                 print(f"[capital_rag] Chain search failed: {e}")
             if paths:
                 present = {chunk_id for chunk_id, _ in candidates}
@@ -1151,7 +1282,7 @@ class Pipeline:
         grounded = []
         if candidates:
             yield from step(f"Bewerte die Relevanz von {len(candidates)} Abschnitten …")
-            grounded = self._grade(user_message, candidates, path_ids)
+            grounded = self._grade(user_message, candidates, path_ids, meter)
 
         if not grounded:
             yield from no_answer("Keine relevanten Abschnitte gefunden")
@@ -1197,21 +1328,22 @@ class Pipeline:
         path_lines = []
         for path in paths:
             refs = []
-            for a, b in zip(path, path[1:]):
+            for a, b in pairwise(path):
                 nums = [
-                    i for i, (doc, _, _) in enumerate(grounded, start=1)
+                    i
+                    for i, (doc, _, _) in enumerate(grounded, start=1)
                     if any(r["source"] == a and r["target"] == b for r in doc.metadata.get("relations", []))
                 ]
                 refs.append(nums)
             if all(refs):
-                line = path[0] + "".join(
-                    f" -> {b} [{', '.join(map(str, nums))}]" for b, nums in zip(path[1:], refs)
-                )
+                line = path[0] + "".join(f" -> {b} [{', '.join(map(str, nums))}]" for b, nums in zip(path[1:], refs))
                 path_lines.append(f"- {line}")
         if path_lines:
             context = (
                 "Causal paths (relations found across the sources; [n] = block that states the step):\n"
-                + "\n".join(path_lines) + "\n\n" + context
+                + "\n".join(path_lines)
+                + "\n\n"
+                + context
             )
 
         # None = follow-ups are computed later by the follow-up task (_follow_ups).
@@ -1220,12 +1352,12 @@ class Pipeline:
             # Never show an unchecked answer: if the check itself fails, refuse.
             answer, has_facts = None, False
             try:
-                for kind, value, detail in self._grounded_answer(user_message, context, blocks):
+                for kind, value, detail in self._grounded_answer(user_message, context, blocks, meter):
                     if kind == "status":
                         yield from step(value, detail)
                     else:
                         answer, has_facts = value, detail
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - fail closed: no checked answer, no answer
                 print(f"[capital_rag] Grounding check failed: {e}")
                 yield from step("Die Prüfung ist fehlgeschlagen")
             if answer is None:
@@ -1239,14 +1371,15 @@ class Pipeline:
             elif self.valves.CORROBORATE and len(blocks) > 1:
                 yield from step("Suche weitere Belege in den anderen Quellen …")
                 try:
-                    answer, added = self._corroborate(answer, context, blocks)
+                    answer, added = self._corroborate(answer, context, blocks, meter)
                     if added:
                         yield from step(f"{added} weitere Beleg(e) aus anderen Quellen ergänzt")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     # Only adds citations: on failure the checked answer stays as it is.
                     print(f"[capital_rag] Corroboration failed: {e}")
             cited = cited_numbers(answer, len(grounded))
             yield from step(f"Antwort geprüft ✓ ({len(cited)} Quellen)", done=True)
+            yield from summary()
             yield from close_log()
             yield answer
         else:
@@ -1254,12 +1387,14 @@ class Pipeline:
             yield from close_log()
             answer = ""
             for chunk in self.llm.stream(
-                ANSWER_PROMPT.format(context=context, question=user_message)
+                ANSWER_PROMPT.format(context=context, question=user_message), config=run_config(meter)
             ):
                 if chunk.content:
                     answer += chunk.content
                     yield chunk.content
             cited = cited_numbers(answer, len(grounded))
+            # After the stream, so the streamed answer is counted too.
+            yield from summary()
 
         # Only the sources the answer actually cites, under their citation numbers.
         source_lines = []
@@ -1275,8 +1410,7 @@ class Pipeline:
                 kind = "Konzept"
             videos = "; ".join(sorted({cite_source(s) for s in meta["sources"]}))
             source_lines.append(
-                f"- [{i}] {meta['title']} ({kind}) - {videos}\n"
-                f"  Relevanz {grade.relevance}/10: {grade.reason}"
+                f"- [{i}] {meta['title']} ({kind}) - {videos}\n  Relevanz {grade.relevance}/10: {grade.reason}"
             )
         if source_lines:
             yield "\n\nQuellen:\n" + "\n".join(source_lines)
